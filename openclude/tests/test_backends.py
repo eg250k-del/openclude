@@ -166,12 +166,19 @@ def test_hf_listing_filters_by_prefix() -> None:
     assert ".gitattributes" not in list(store.list(""))
 
 
-def test_hf_listing_of_a_missing_repo_is_empty_not_fatal() -> None:
-    class FakeClient:
-        def list_repo_files(self, **_kw):
-            raise RuntimeError("404 repo does not exist")
+def test_hf_listing_of_a_missing_repo_is_a_fault_not_an_empty_result() -> None:
+    """A repo that is not there is a configuration error worth saying out loud.
 
-    assert list(HFStore("a/b", client=FakeClient()).list("")) == []
+    An earlier version returned an empty listing, which is indistinguishable
+    from a healthy empty repository, and that is how a revoked token came to be
+    reported as a working store.
+    """
+    class NoRepo:
+        def list_repo_tree(self, **_kw):
+            raise RuntimeError("404 Repository Not Found")
+
+    with pytest.raises(StorageError, match="cannot list"):
+        HFStore("a/b", client=NoRepo()).list("")
 
 
 def test_hf_deleting_something_absent_is_fine() -> None:
@@ -726,6 +733,87 @@ def test_prune_actually_deletes_on_hf() -> None:
     assert freed["objects"] == 2
     left = {p for p in client.files if not p.endswith("/")}
     assert left == {"f01/film/final.mp4", "f01/state/ledger.json"}
+
+
+# --------------------------------------------------------------------------
+# a dead credential must never look like an empty repository
+#
+# The store command reported "0 objects, 0.0 GB used, everything fine" while
+# the token had been revoked. `_files()` swallowed the auth error and returned
+# an empty list, and an empty list is exactly what a healthy empty repo looks
+# like. This block exists so that stays impossible.
+# --------------------------------------------------------------------------
+
+
+class _DeadClient:
+    def create_repo(self, **_kw):
+        return "ok"
+
+    def list_repo_tree(self, **_kw):
+        raise RuntimeError("401 Invalid user token")
+
+    def file_exists(self, **_kw):
+        return False
+
+
+def test_a_dead_token_raises_rather_than_reporting_empty() -> None:
+    from openclude.storage import StorageError as SE
+
+    with pytest.raises(SE, match="cannot list"):
+        HFStore("a/b", client=_DeadClient()).list("")
+
+
+def test_the_error_says_a_token_problem_not_an_empty_store() -> None:
+    from openclude.storage import StorageError as SE
+
+    with pytest.raises(SE) as exc:
+        HFStore("a/b", client=_DeadClient()).sizes()
+    assert "HF_TOKEN" in str(exc.value)
+    assert "fault" in str(exc.value)
+
+
+def test_a_genuinely_empty_repo_is_still_empty_and_fine() -> None:
+    """The two cases must stay distinguishable, or the check above is useless."""
+    store = HFStore("a/b", client=_Liveish({}))
+    assert list(store.list("")) == []
+    assert store.total_used() == 0
+
+
+def test_identify_reports_a_rejected_credential(monkeypatch) -> None:
+    def deny(token=None):
+        raise RuntimeError("401 Invalid user token")
+
+    _with_module(monkeypatch, "huggingface_hub", {"whoami": deny})
+    ident = HFStore("a/b", token="t", client=_DeadClient()).identify()
+    assert ident["ok"] is False
+    assert "401" in ident["error"]
+
+
+def test_identify_reports_who_you_are(monkeypatch) -> None:
+    def ok(token=None):
+        return {"name": "mostaa2500",
+                "auth": {"accessToken": {"displayName": "openclude-salad"}}}
+
+    _with_module(monkeypatch, "huggingface_hub", {"whoami": ok})
+    ident = HFStore("a/b", token="t", client=_Liveish({})).identify()
+    assert ident["ok"] is True
+    assert ident["user"] == "mostaa2500"
+    assert ident["token"] == "openclude-salad"
+
+
+def test_can_write_is_false_when_the_upload_fails(monkeypatch) -> None:
+    def boom(**_kw):
+        raise RuntimeError("403 forbidden")
+
+    _with_module(monkeypatch, "huggingface_hub", {"upload_file": boom})
+    assert HFStore("a/b", client=_RepoOk()).can_write() is False
+
+
+def test_can_write_is_true_when_the_round_trip_works(monkeypatch) -> None:
+    c = _Liveish({})
+    _with_module(monkeypatch, "huggingface_hub", {"upload_file": c.upload_file})
+    assert HFStore("a/b", client=c).can_write() is True
+    assert "_probe/can_write" not in c.files, "the probe must clean up after itself"
 
 
 # --------------------------------------------------------------------------

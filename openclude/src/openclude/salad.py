@@ -310,15 +310,46 @@ def cmd_preflight(cfg: Config, _args: list[str]) -> int:
     return 0
 
 
+#: Substrings that mark an environment variable as holding a secret.
+#:
+#: TOKEN matters as much as KEY and SECRET, and forgetting it is not a
+#: hypothetical: `HF_TOKEN` matched neither "SECRET" nor "KEY", so the plan
+#: command printed the live Hugging Face token in full. Anyone reading the
+#: output, or pasting it into a chat, published a credential.
+#:
+#: A false positive is harmless. A false negative leaks a key, so the list is
+#: deliberately wide.
+SECRET_MARKERS = ("SECRET", "TOKEN", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL",
+                  "AUTH", "SESSION", "COOKIE", "SIGNATURE")
+
+
+def is_secret_name(name: str) -> bool:
+    upper = name.upper()
+    return any(marker in upper for marker in SECRET_MARKERS)
+
+
+def redact_env(envs: dict) -> dict:
+    """Replace every secret value with a marker, keeping the names visible.
+
+    The names are kept because which variables are set is the useful part of a
+    plan. The values are not, ever.
+    """
+    out = {}
+    for k, v in envs.items():
+        if is_secret_name(k):
+            out[k] = "***set***" if v else ""
+        else:
+            out[k] = v
+    return out
+
+
 def cmd_plan(cfg: Config, _args: list[str]) -> int:
     spec = group_spec(cfg)
     print("GROUP SPEC (nothing is sent; this is exactly what --apply would post)\n")
     redacted = json.loads(json.dumps(spec))
-    envs = redacted.get("container", {}).get("environment_variables", {})
-    for k, v in list(envs.items()):
-        if any(s in k for s in ("SECRET", "KEY")) and v:
-            envs[k] = "***set***"
-        # (redaction happens in place on the nested container envs)
+    container = redacted.get("container", {})
+    if isinstance(container.get("environment_variables"), dict):
+        container["environment_variables"] = redact_env(container["environment_variables"])
     print(json.dumps(redacted, indent=2))
     print()
     print("COST CEILING")

@@ -147,7 +147,6 @@ def cmd_store(args: argparse.Namespace) -> int:
 
     try:
         store = build_store(backend)
-        usage = measure(store)
     except Exception as exc:  # noqa: BLE001
         print()
         print(f"  UNREACHABLE: {type(exc).__name__}: {exc}")
@@ -156,6 +155,35 @@ def cmd_store(args: argparse.Namespace) -> int:
     print()
     print(f"  {'target':<20} {getattr(store, 'repo_id', None) or getattr(store, 'bucket', None) or store.root}")
     print(f"  {'free tier':<20} {FREE_TIER_GB:.0f} GB")
+
+    # A store that lists nothing is ambiguous: it could be empty, or the
+    # credential could be dead. A dead credential once reported as a healthy
+    # empty repository here, which is worse than useless.
+    if hasattr(store, "identify"):
+        ident = store.identify()
+        if not ident.get("ok"):
+            print()
+            print(f"  CREDENTIAL REJECTED: {ident.get('error')}")
+            print("  The repository is fine; the token is not. Create a new one")
+            print("  at huggingface.co -> Settings -> Access Tokens -> Write.")
+            return 1
+        print(f"  {'signed in as':<20} {ident.get('user')}")
+        print(f"  {'token':<20} {ident.get('token')}")
+        writable = store.can_write()
+        print(f"  {'can write':<20} {'yes, verified' if writable else 'NO'}")
+        if not writable:
+            print()
+            print("  The token can read but not write. A film would vanish on the")
+            print("  first upload. Give the token Write permission.")
+            return 1
+
+    try:
+        usage = measure(store)
+    except Exception as exc:  # noqa: BLE001
+        print()
+        print(f"  UNREACHABLE: {type(exc).__name__}: {exc}")
+        return 1
+
     print()
     print(describe(usage, seconds_of_film=120.0, shots=400))
 

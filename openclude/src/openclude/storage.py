@@ -434,6 +434,53 @@ class HFStore:
         except Exception:  # noqa: BLE001 - a miss and a failure both mean "no"
             return False
 
+    def identify(self) -> dict:
+        """Who the token belongs to, and is it alive.
+
+        A listing that returns nothing is ambiguous: an empty repository and a
+        revoked token look identical. That ambiguity is how a dead token was
+        reported as a healthy empty store, so the doctor asks the question
+        directly instead of inferring it.
+        """
+        try:
+            from huggingface_hub import whoami  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - 0.x only has it on the client
+            whoami = None  # type: ignore[assignment]
+
+        try:
+            if whoami is not None:
+                info = whoami(token=self.token)
+            else:  # pragma: no cover - only on the old library
+                info = self.client.whoami()  # type: ignore[attr-defined]
+                info = {"name": getattr(info, "name", "?")}
+            return {
+                "ok": True,
+                "user": info.get("name", "?"),
+                "token": (info.get("auth", {}).get("accessToken", {})
+                          .get("displayName", "?")),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def can_write(self) -> bool:
+        """Prove write access with a real round trip, then undo it.
+
+        A read-only token can list a private repository and fail on the first
+        upload, which is exactly when a film starts disappearing. The cost is
+        one tiny object, created and deleted.
+        """
+        import tempfile
+
+        probe = Path(tempfile.mkdtemp()) / "probe.bin"
+        probe.write_bytes(b"openclude write probe")
+        key = "_probe/can_write"
+        try:
+            self.put(key, probe)
+        except Exception:  # noqa: BLE001
+            return False
+        self.delete(key)
+        return True
+
     def delete(self, key: str) -> None:
         target = self._key(key)
         try:
@@ -486,8 +533,14 @@ class HFStore:
 
         Folders are filtered out by the absence of a size, not by a type
         attribute: neither RepoFile nor RepoFolder carries one, so the first
-        version of this counted `f01/clips` as an object. That inflated the
-        usage report and, worse, handed folder names to delete().
+        version of this counted `f01/clips` as an object.
+
+        An API error is raised, not swallowed. An empty repository genuinely
+        returns no entries, so "empty" and "unreachable" are distinguishable,
+        and conflating them is how a revoked token was reported as a healthy
+        empty repository. That was the third defect in this file with the same
+        root cause: an `except Exception` turning a failure into a
+        plausible-looking answer.
         """
         if self._tree is None:
             entries: list[dict] = []
@@ -506,8 +559,15 @@ class HFStore:
                     if not path or path.startswith("."):  # .gitattributes and friends
                         continue
                     entries.append({"path": path, "size": int(size or 0)})
-            except Exception:  # noqa: BLE001
-                entries = []
+            except StorageError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise StorageError(
+                    f"cannot list {self.repo_id}: {type(exc).__name__}: {exc}\n"
+                    f"  An empty repository lists fine and returns nothing, so this\n"
+                    f"  is a fault rather than an empty store. Check that HF_TOKEN\n"
+                    f"  is still valid and still has write access."
+                ) from exc
             self._tree = entries
         return self._tree
 
