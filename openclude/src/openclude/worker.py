@@ -238,20 +238,25 @@ def main() -> int:
         profile=int(ENGINE_PROFILE),
     )
 
-    deps = {
-        "engine": adapter,
-        "writer": deps_writer(),
-        "synth": deps_synth(),
-    }
-
     STATE.detail = "loading the engine"
+    session = None
     try:
         adapter.start()
+        session = adapter.session
     except Exception as exc:  # noqa: BLE001
         # Do not exit. A cold start can fail while weights are still landing;
         # staying alive lets the liveness probe pass and the retry happen.
         log.error("engine did not start: %s", exc)
         STATE.detail = f"engine unavailable: {exc}"
+
+    # Built after start(), not before: the speech backend picks engine mode
+    # based on having a live session, and adapter.render needs the session too.
+    deps = {
+        "engine": adapter,
+        "writer": deps_writer(),
+        "synth": deps_synth(session),
+    }
+    log.info("speech backend: %s", type(deps["synth"]).__name__)
 
     STATE.ready = True
     STATE.detail = "idle"
@@ -283,29 +288,68 @@ def main() -> int:
 
 
 def deps_writer() -> Any:
-    """The ScriptWriter. Not implemented here: see PROJECT_STATUS next steps."""
+    """The ScriptWriter.
+
+    Returns the real client when one is configured, and a writer that refuses
+    loudly when one is not. A silent default here would let a job reach the
+    render stage with a script that was never written.
+    """
     from .llm import ScriptError
+
+    if os.environ.get("LLM_API_KEY", "").strip():
+        from .llm_client import writer_from_env
+
+        log.info("script writer: OpenAI-compatible endpoint, model %s",
+                 os.environ.get("LLM_MODEL", "default"))
+        return writer_from_env()
 
     def missing(*_a: Any, **_k: Any) -> str:
         raise ScriptError(
-            "no LLM client is wired into the worker yet. "
-            "Implement the ScriptWriter protocol and pass it in here."
+            "no LLM configured. Set LLM_API_KEY (and LLM_BASE_URL, LLM_MODEL). "
+            "The SaladCloud AI Gateway works: LLM_BASE_URL="
+            "https://api.salad.com/api/public with a gateway key."
         )
 
     return type("UnconfiguredWriter", (), {"write": staticmethod(missing)})()
 
 
-def deps_synth() -> Any:
-    """The Synthesiser. Not implemented here: see PROJECT_STATUS next steps."""
+def deps_synth(session: Any = None) -> Any:
+    """The Synthesiser.
+
+    Engine mode is preferred when the session is up, because it clones a
+    distinct voice per character and reads `[emotion]` tags, which the HTTP
+    backends do not.
+
+    A misconfiguration is never swallowed. Only "engine mode with no session
+    yet" falls back to a synth that refuses, because that is a real ordering
+    state during a cold start; a bad TTS_MODE is the operator's typo and
+    replacing its message would hide the actual problem.
+    """
     from .audio import AudioError
+    from .tts_client import EngineSynth, OpenAICompatSynth, synth_from_env
 
-    def missing(*_a: Any, **_k: Any) -> str:
-        raise AudioError(
-            "no TTS client is wired into the worker yet. "
-            "Implement the Synthesiser protocol and pass it in here."
-        )
+    try:
+        return synth_from_env(session)
+    except AudioError as exc:
+        if session is None and "needs the engine session" in str(exc):
+            log.warning("engine speech unavailable during startup: %s", exc)
+            return _RefusingSynth(
+                "no speech backend is available. The engine session has not "
+                "finished loading and no HTTP backend is configured. Set "
+                "TTS_API_KEY / TTS_BASE_URL / TTS_MODEL to speak without the engine."
+            )
+        raise
 
-    return type("UnconfiguredSynth", (), {"speak": staticmethod(missing)})()
+
+def _RefusingSynth(message: str) -> Any:
+    """A synth that exists only to fail with a useful message."""
+
+    def speak(*_a: Any, **_k: Any) -> str:
+        from .audio import AudioError
+
+        raise AudioError(message)
+
+    return type("RefusingSynth", (), {"speak": staticmethod(speak)})()
 
 
 if __name__ == "__main__":

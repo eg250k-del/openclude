@@ -80,6 +80,20 @@ class WanGPAdapter:
     _session: Any = field(default=None, init=False, repr=False)
     _import_error: str = field(default="", init=False, repr=False)
 
+    @property
+    def session(self) -> Any:
+        """The live engine session, or None.
+
+        Exposed so the speech backend can share it. The engine keeps a
+        process-wide runtime singleton and raises if you init a second session
+        with different arguments, so starting one per consumer does not work.
+        """
+        return self._session
+
+    @property
+    def started(self) -> bool:
+        return self._session is not None
+
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> "WanGPAdapter":
