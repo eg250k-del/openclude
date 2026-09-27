@@ -1,0 +1,84 @@
+name: build-image
+
+# Build the image on GitHub's runners and push it to GHCR.
+#
+# Why not build on the user's Windows machine:
+#   - Docker Desktop is a large install and needs a WSL2 VM
+#   - a CUDA image is 8+ GB; uploading it from home would be slow and flaky
+#   - GitHub's runners are free for this and always the same
+#
+# The image is linux/amd64 because SaladCloud only supports AMD64. On a
+# Windows runner that means QEMU emulation, which is slow to build but only
+# needs to happen once per change.
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    paths:
+      - "openclude/Dockerfile"
+      - "openclude/src/**"
+      - "openclude/pyproject.toml"
+      - "openclude/deploy/**"
+      - ".github/workflows/build-image.yml"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # Tag on every build, not just releases, so a rollback is always possible.
+  TAG: ${{ github.sha }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the code before it becomes an image
+        # A broken pipeline is worse than a failed build: it would be caught
+        # on a rented GPU, at cost, hours later.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the test suite
+        working-directory: openclude
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pytest -q
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./openclude
+          file: ./openclude/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          # The CUDA base is huge and changes only when the Dockerfile does.
+          # Caching is what makes a rebuild take minutes instead of an hour.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Report the tag
+        run: echo "pushed ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}"
