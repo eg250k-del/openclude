@@ -82,17 +82,44 @@ RUN python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
    python3.11 -m pip install --no-cache-dir 'onnxruntime>=1.22.0'
 
 # --------------------------------------------------------------------- engine
-WORKDIR /opt/WanGP
+# A build toolchain is not optional. The engine pulls in packages with C
+# extensions, and the cudnn-runtime base image has no compiler at all, so pip
+# fails with the least informative error Python can produce. This was the
+# first build's actual failure.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cloned in its own layer so a failure names the step that failed rather than
+# being buried inside a three-command chain.
 RUN git clone --depth 1 --branch ${WAN2GP_REF} \
         https://github.com/deepbeepmeep/Wan2GP.git /opt/WanGP \
- && git -C /opt/WanGP rev-parse HEAD > /opt/WanGP/.pinned-ref \
- && python3.11 -m pip install --no-cache-dir -r /opt/WanGP/requirements.txt
+ && cd /opt/WanGP \
+ && git rev-parse HEAD > .pinned-ref \
+ && echo "engine pinned at $(cat .pinned-ref)"
 
-# The engine assumes a desktop. Two patches, both required with no display:
-#   1. matanyone picks the TkAgg backend, which cannot initialise headless.
-#   2. the notification sound is force-disabled headlessly by the engine itself,
-#      so pygame/sounddevice are not needed, but SDL must not try to open a
-#      device either.
+# --extra-index-url is the important part. Without it pip resolves torch from
+# PyPI and happily installs the CPU-only wheel, which silently undoes the
+# cu128 install above and yields an image that cannot use the GPU. The engine's
+# own Colab bootstrap uses the same trick.
+#
+# --extra-index-url is preferred over --index-url here so a plain PyPI
+# requirement still resolves. If a transitive pin does move torch, the next
+# layer forces the CUDA build back.
+RUN python3.11 -m pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cu128 \
+        -r /opt/WanGP/requirements.txt
+
+# Re-assert the CUDA torch after the requirements pass. Without the "+cu128"
+# local version tag, pip installs a CPU build that imports fine and then fails
+# at the first .cuda() call, on a rented GPU, at cost.
+RUN python3.11 -m pip install --no-cache-dir --force-reinstall \
+        torch==2.10.0+cu128 torchvision==0.25.0+cu128 torchaudio==2.10.0+cu128 \
+        --index-url https://download.pytorch.org/whl/cu128 \
+ && python3.11 -c "import torch,sys; print(torch.__version__, torch.version.cuda); sys.exit(0 if torch.version.cuda else 1)"
+
+# The engine assumes a desktop. The patch is build-time only, so it must be
+# applied here or the container dies on the first image it touches.
 RUN set -eux; \
     f=/opt/WanGP/preprocessing/matanyone/tools/interact_tools.py; \
     test -f "$f"; \

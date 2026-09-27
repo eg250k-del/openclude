@@ -65,6 +65,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ./openclude
@@ -79,6 +80,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+
+      # The default log viewer collapses the actual error, and the build log
+      # API needs a token. Teeing the plain log to the job summary means a
+      # failure is readable from the run page without any authentication.
+      - name: Surface the build log on failure
+        if: failure() && steps.build.outputs.buildx-build-summary
+        run: |
+          echo "## docker buildx summary" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.build.outputs.buildx-build-summary }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report the tag
         run: echo "pushed ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}"

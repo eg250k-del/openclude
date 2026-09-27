@@ -98,6 +98,34 @@ def test_torch_is_baked_not_installed_at_start(dockerfile) -> None:
     assert "cu128" in text
 
 
+def test_the_requirements_pass_cannot_pull_a_cpu_torch(dockerfile) -> None:
+    """A CPU torch imports cleanly and fails at the first .cuda() call.
+
+    That is a failure on a rented GPU, at cost, minutes into a run. The
+    cu128 index plus a forced reinstall is what prevents it.
+    """
+    text = "\n".join(dockerfile)
+    assert "download.pytorch.org/whl/cu128" in text
+    assert "--extra-index-url" in text
+    assert "torch==2.10.0+cu128" in text
+    assert "torch.version.cuda" in text
+
+
+def test_a_compiler_is_present_for_c_extensions(dockerfile) -> None:
+    """The cudnn-runtime base has no compiler. The first build failed on this."""
+    text = "\n".join(dockerfile)
+    assert "build-essential" in text
+
+
+def test_the_engine_clone_is_its_own_layer(dockerfile) -> None:
+    """Chained clone+install means a failure names neither step."""
+    text = "\n".join(dockerfile)
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("RUN") and "git clone" in s:
+            assert "pip install" not in s, "clone and install are chained again"
+
+
 def test_the_engine_is_cloned_from_the_live_repo(dockerfile) -> None:
     text = "\n".join(dockerfile)
     assert "deepbeepmeep/Wan2GP" in text
