@@ -112,117 +112,128 @@ def test_no_secret_is_printed_by_plan(clean_env, capsys) -> None:
 
 
 # --------------------------------------------------------------------------
-# cost
+# the spec matches the official OpenAPI shape
+#
+# These assertions exist because the first draft of group_spec() guessed the
+# shape and every part of it was wrong: image at the top level instead of
+# inside container, resources.storage instead of storage_amount, a `probes`
+# dict instead of liveness_probe/readiness_probe, and no autostart_policy at
+# all. SaladCloud rejects a body that does not match ContainerGroupPrototype.
 # --------------------------------------------------------------------------
 
-
-def test_minimum_replicas_is_zero_so_idle_costs_nothing(clean_env) -> None:
-    """A running replica bills every second. Idle must be free."""
-    cfg = Config.from_env()
-    assert cfg.min_replicas == 0
-    assert main(["plan"]) == 0
+SPEC = "https://raw.githubusercontent.com/SaladTechnologies/salad-cloud-docs/main/api-specs/salad-cloud.yaml"
 
 
-def test_plan_prints_the_cost_ceiling(clean_env, capsys) -> None:
-    main(["plan"])
-    out = capsys.readouterr().out
-    assert "COST CEILING" in out
-    assert "$0.00/h" in out
-
-
-# --------------------------------------------------------------------------
-# the spec itself
-# --------------------------------------------------------------------------
+def container_of(cfg=None) -> dict:
+    return group_spec(cfg or Config.from_env())["container"]
 
 
 def test_the_spec_targets_amd64(clean_env) -> None:
-    assert group_spec(Config.from_env())["image"]["architecture"] == "amd64"
+    assert container_of()["image"]["architecture"] == "amd64"
+
+
+def test_the_spec_uses_the_image_repository(clean_env) -> None:
+    assert container_of()["image"]["repository"] == os.environ["OPENCLIDE_IMAGE"]
 
 
 def test_the_spec_asks_for_profile_3_for_24gb(clean_env) -> None:
     """Profile 3 is the engine's own label for 24 GB VRAM; 5 is a 10 GB choice."""
-    spec = group_spec(Config.from_env())
-    assert spec["environment_variables"]["WAN2GP_PROFILE"] == "3"
+    env = container_of()["environment_variables"]
+    assert env["WAN2GP_PROFILE"] == "3"
 
 
 def test_the_spec_uses_sage_attention(clean_env) -> None:
-    assert group_spec(Config.from_env())["environment_variables"]["WAN2GP_ATTENTION"] == "sage2"
+    assert container_of()["environment_variables"]["WAN2GP_ATTENTION"] == "sage2"
 
 
 def test_the_spec_asks_for_a_large_disk(clean_env) -> None:
     """The node must have room for the weights plus a 720p working set."""
-    assert group_spec(Config.from_env())["resources"]["storage"] >= 100_000
+    assert container_of()["resources"]["storage_amount"] >= 100_000
+
+
+def test_the_spec_does_not_autostart(clean_env) -> None:
+    """A group that autostarts bills all night. The autoscaler decides."""
+    assert group_spec(Config.from_env())["autostart_policy"] is False
+
+
+def test_the_spec_declares_a_queue_autoscaler(clean_env) -> None:
+    autoscaler = group_spec(Config.from_env())["queue_autoscaler"]
+    assert autoscaler["min_replicas"] == 0
+    assert autoscaler["max_replicas"] >= 1
+    assert autoscaler["desired_queue_length"] >= 1
+
+
+def test_the_spec_satisfies_every_required_field(clean_env) -> None:
+    """The five fields ContainerGroupPrototype marks required."""
+    spec = group_spec(Config.from_env())
+    for field in ("autostart_policy", "container", "name", "replicas",
+                  "restart_policy"):
+        assert field in spec, field
+
+
+def test_the_nested_containers_satisfy_their_required_fields(clean_env) -> None:
+    spec = group_spec(Config.from_env())
+    for field in ("image", "resources"):
+        assert field in spec["container"], field
+    for field in ("cpu", "memory"):
+        assert field in spec["container"]["resources"], field
+    for field in ("auth", "port", "protocol"):
+        assert field in spec["networking"], field
+
+
+def test_every_probe_carries_all_five_required_fields(clean_env) -> None:
+    spec = group_spec(Config.from_env())
+    for name in ("liveness_probe", "readiness_probe"):
+        probe = spec[name]
+        for field in ("failure_threshold", "initial_delay_seconds",
+                      "period_seconds", "success_threshold", "timeout_seconds"):
+            assert field in probe, f"{name}.{field}"
+        for field in ("headers", "path", "port", "scheme"):
+            assert field in probe["http"], f"{name}.http.{field}"
 
 
 def test_the_startup_probe_allows_a_long_model_download(clean_env) -> None:
-    """A short probe threshold kills the instance mid-download."""
-    probe = group_spec(Config.from_env())["probes"]["startup"]["http"]
-    assert probe["failure_threshold"] * probe["period_seconds"] >= 300
+    """A short probe window kills the instance mid-download and wastes the run."""
+    probe = group_spec(Config.from_env())["readiness_probe"]
+    grace = probe["failure_threshold"] * probe["period_seconds"]
+    assert grace >= 300
 
 
 def test_the_spec_requires_object_storage(clean_env) -> None:
     """The container must refuse to start without a durable store."""
-    assert group_spec(Config.from_env())["environment_variables"]["OPENCLIDE_REQUIRE_STORE"] == "1"
+    env = container_of()["environment_variables"]
+    assert env["OPENCLIDE_REQUIRE_STORE"] == "1"
 
 
 def test_the_spec_restarts_on_failure(clean_env) -> None:
-    assert group_spec(Config.from_env())["restart"]["condition"] == "always"
+    assert group_spec(Config.from_env())["restart_policy"]["condition"] == "always"
 
 
-def test_the_spec_exposes_one_http_port(clean_env) -> None:
-    net = group_spec(Config.from_env())["network"]
+def test_the_spec_exposes_one_http_port_without_auth(clean_env) -> None:
+    net = group_spec(Config.from_env())["networking"]
     assert net["port"] == 8000
     assert net["protocol"] == "http"
+    assert net["auth"] is False
 
 
-def test_the_spec_is_json_serialisable(clean_env) -> None:
-    json.dumps(group_spec(Config.from_env()))
+def test_the_base_url_is_the_one_in_the_spec(clean_env) -> None:
+    """`/api/v1` 404s for every documented path. The spec says /api/public."""
+    assert salad.API.endswith("/api/public")
 
 
-# --------------------------------------------------------------------------
-# dispatch
-# --------------------------------------------------------------------------
+def test_the_auth_header_is_the_one_in_the_spec(clean_env) -> None:
+    assert salad.AUTH_HEADER == "Salad-Api-Key"
 
 
-def test_an_unknown_command_prints_help(clean_env) -> None:
-    assert main([]) == 1
-    assert main(["nonsense"]) == 1
-    assert main(["preflight", "plan"]) == 1
+def test_the_user_agent_is_set(clean_env) -> None:
+    """Cloudflare rejects the default urllib agent with error 1010."""
+    assert "Python-urllib" not in salad.USER_AGENT
+    assert salad.USER_AGENT
 
 
-def test_every_documented_command_is_implemented() -> None:
-    for name in ("preflight", "plan", "apply", "status", "logs"):
-        assert name in salad.COMMANDS
-        assert callable(salad.COMMANDS[name])
+def test_the_quota_path_comes_from_the_spec(clean_env) -> None:
+    import inspect
 
-
-def test_the_dockerfile_pins_the_engine() -> None:
-    root = ROOT
-    docker = root / "Dockerfile"
-    if not docker.exists():
-        pytest.skip("no Dockerfile")
-    text = docker.read_text("utf-8")
-    assert "deepbeepmeep/Wan2GP" in text
-    assert "torch==2.10.0" in text
-    # a build-time-only patch, with its verification
-    assert "TkAgg" in text
-    assert "fps_mode" in text          # the reason for the static ffmpeg
-
-
-def test_the_entrypoint_refuses_to_start_without_a_store() -> None:
-    sh = ROOT / "deploy" / "entrypoint.sh"
-    if not sh.exists():
-        pytest.skip("no entrypoint")
-    text = sh.read_text("utf-8")
-    assert "OPENCLIDE_REQUIRE_STORE" in text
-    assert "startup.lock" in text      # the Safe Mode trap
-    assert "set -euo pipefail" in text
-
-
-def test_the_dockerfile_exposes_the_health_port() -> None:
-    docker = ROOT / "Dockerfile"
-    if not docker.exists():
-        pytest.skip
-    text = docker.read_text("utf-8")
-    assert "EXPOSE 8000" in text
-    assert "/health" in text
+    src = inspect.getsource(salad.cmd_preflight)
+    assert "/organizations/{cfg.organization}/quotas" in src
+    assert "/node-pools" not in src

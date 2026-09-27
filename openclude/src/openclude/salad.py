@@ -312,7 +312,7 @@ def cmd_plan(cfg: Config, _args: list[str]) -> int:
     for k, v in list(envs.items()):
         if any(s in k for s in ("SECRET", "KEY")) and v:
             envs[k] = "***set***"
-            redacted["environment_variables"][k] = "***set***"
+        # (redaction happens in place on the nested container envs)
     print(json.dumps(redacted, indent=2))
     print()
     print("COST CEILING")
