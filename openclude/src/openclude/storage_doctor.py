@@ -57,8 +57,27 @@ class Usage:
 
 
 def measure(store: Any, prefix: str = "") -> Usage:
-    """Walk the bucket and total it up. Read-only."""
+    """Walk the bucket and total it up. Read-only.
+
+    A store that can report every size in one call is asked to, because the
+    obvious implementation costs one API call per object and a 2-hour film has
+    roughly 1900 of them.
+    """
     usage = Usage()
+    try:
+        sizes = store.sizes()
+    except Exception:  # noqa: BLE001 - an old or partial store, fall back
+        sizes = None
+    if sizes is not None:
+        for key, size in sizes.items():
+            if prefix and not key.startswith(prefix):
+                continue
+            usage.objects += 1
+            usage.bytes_total += int(size)
+            head = key.split("/")[0] if "/" in key else "(root)"
+            usage.by_prefix[head] = usage.by_prefix.get(head, 0) + int(size)
+        return usage
+
     for key in store.list(prefix or ""):
         try:
             size = store.size(key)

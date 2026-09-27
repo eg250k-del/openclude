@@ -30,15 +30,18 @@ without warning.
 
 ## Where it actually is
 
-Built, tested, committed, and the container image builds on GitHub. **Not
-deployed**, because the object storage credentials are the one missing piece
-and only the user can create those.
+**Storage is live and proven.** The pipeline is built, tested and committed,
+the image builds on GitHub, and the object store has been written to, read
+back and emptied against a real private Hugging Face repo. Not deployed yet,
+because the SaladCloud job queue does not exist and nothing has ever run on a
+GPU.
 
 | | |
 |---|---|
-| tests | 409 passing, 4 skipped (need ffmpeg, absent locally) |
-| code | ~5,300 source lines / ~5,000 test lines |
+| tests | 447 passing, 4 skipped (need ffmpeg, absent locally) |
+| code | ~5,600 source lines / ~5,500 test lines |
 | image | `ghcr.io/eg250k-del/openclude` built and pushed by CI |
+| storage | `mostaa2500/openclude`, private, live |
 | account | SaladCloud org `mostafa-ai`, project `aoutooanimation` |
 | quota | 10 container replicas, 0 currently used |
 | cost so far | $0 |
@@ -103,13 +106,40 @@ python -m openclude.cli store
 
 ## The user's only remaining task
 
-1. `huggingface.co` → Join (free)
-2. Datasets → New dataset → name it → **Private**
-3. Settings → Access Tokens → Create → permission **Write** → copy the token
-4. Set `HF_REPO=<user>/<repo>` and `HF_TOKEN=<token>`, then run
-   `python -m openclude.cli store` until it reports usage
+**Nothing.** Storage is live. A private Hugging Face dataset repo exists at
+`mostaa2500/openclude` and has been written to, read from and emptied for real.
 
-Never paste the token into chat. It goes in the shell only.
+Credentials live in `C:\Users\Pc\.openclude\env.ps1`, deliberately outside the
+git repository. Dot-source it before anything that touches storage:
+
+```powershell
+. "$env:USERPROFILE\.openclude\env.ps1"
+```
+
+## What testing against the real repo found
+
+Five bugs, none of which any unit test could have caught, because the unit
+tests used a fake client and never imported `huggingface_hub`. The installed
+version is **1.33.0**, and 1.x renamed a lot:
+
+| # | what | how it would have failed |
+|---|---|---|
+| 1 | `hf_hub_upload` → `upload_file` | writes never worked at all |
+| 2 | `repo_type` was never passed | writes addressed to the model namespace; the repo is a dataset |
+| 3 | `file_info` removed | `exists()` returned False for files that were there |
+| 4 | tree listings include folders | usage inflated; `delete()` got folder names |
+| 5 | `delete_file(filename=…)` → `path_in_repo` | `prune()` deleted nothing while reporting a saving |
+
+Number 3 is the serious one. `restore_if_present()` calls `exists()` to decide
+whether to resume, so every restarted container would have restarted the whole
+film from shot one, silently, with no error anywhere.
+
+Number 5 is the reason `delete()` no longer swallows exceptions. It caught a
+class of bug rather than a bug: every `except Exception: pass` in the store is
+a place where the project can report success while doing nothing.
+
+The general lesson, now enforced by tests: adapter code for a third-party
+library must be tested against the installed library, not a stand-in.
 
 ## Commands that exist
 
@@ -139,12 +169,12 @@ cd G:\opencode\openclude
 
 ## The next three steps, in order
 
-1. Create the HF dataset repo and token (above), then run
-   `python -m openclude.cli store` until it reports usage.
-2. Create the SaladCloud job queue:
-   `POST /organizations/mostafa-ai/projects/aoutooanimation/queues`
-3. `python -m openclude.salad apply --apply` — dry-run by default, `--apply`
+1. `. "$env:USERPROFILE\.openclude\env.ps1"`, then create the SaladCloud job
+   queue: `POST /organizations/mostafa-ai/projects/aoutooanimation/queues`
+2. `python -m openclude.salad apply --apply` — dry-run by default, `--apply`
    is mandatory, and `min_replicas` is 0 so an idle deployment costs nothing.
+3. Run the first real 60-second film. Success is `done=15` in the ledger and a
+   `final.mp4` that plays.
 
 ## Working rules for this project
 

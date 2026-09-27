@@ -156,12 +156,15 @@ class LocalStore:
         p = self._p(key)
         return p.stat().st_size if p.exists() else 0
 
+    def sizes(self) -> dict[str, int]:
+        return {
+            str(f.relative_to(self.root)).replace("\\", "/"): f.stat().st_size
+            for f in self.root.rglob("*")
+            if f.is_file()
+        }
+
     def total_used(self) -> int:
-        total = 0
-        for f in self.root.rglob("*"):
-            if f.is_file():
-                total += f.stat().st_size
-        return total
+        return sum(self.sizes().values())
 
     def delete(self, key: str) -> None:
         self._p(key).unlink(missing_ok=True)
@@ -175,6 +178,98 @@ class LocalStore:
             for p in sorted(base.rglob("*"))
             if p.is_file()
         )
+
+
+def _hf_callable(*names: str) -> object:
+    """Find a huggingface_hub function across its renames.
+
+    This helper exists because the first live test caught a real bug:
+    `hf_hub_upload` was renamed to `upload_file` in huggingface_hub 1.x, and
+    the unit tests could not see it because they used a fake client and never
+    imported the library. The failure mode it caused is the worst kind: the
+    store was unreachable for writes while every test passed.
+
+    So the lookup is centralised, tries the modern name first, and raises with
+    the installed version attached so the cause is obvious from the log alone.
+    """
+    hf = _hf_module()
+    for name in names:
+        fn = getattr(hf, name, None)
+        if callable(fn):
+            return fn
+
+    raise StorageError(
+        f"huggingface_hub {getattr(hf, '__version__', '?')} has none "
+        f"of {list(names)}. The library was renamed and the image pins an older "
+        f"version than this code expects, or vice versa."
+    )
+
+
+def _hf_module() -> object:
+    try:
+        import huggingface_hub  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise StorageError(
+            "huggingface_hub is not installed. It is part of the engine's "
+            "requirements, so this should not happen in the image."
+        ) from exc
+    return huggingface_hub
+
+
+def _delete_kwargs(fn: object, repo_id: str, key: str, token: str | None) -> dict:
+    """Build delete arguments for whichever huggingface_hub is installed.
+
+    Same story as upload: the rename came with a signature change.
+
+        0.x  delete_file(filename, repo_id, token=, repo_type=)
+        1.x  delete_file(path_in_repo, repo_id, token=, repo_type=)
+
+    Found by a live test, after prune() had been quietly deleting nothing,
+    because delete() swallowed every exception it was given.
+    """
+    import inspect
+
+    try:
+        params = set(inspect.signature(fn).parameters)  # type: ignore[arg-type]
+    except (TypeError, ValueError):  # pragma: no cover
+        params = set()
+
+    name = "path_in_repo" if "path_in_repo" in params else "filename"
+    return {name: key, "repo_id": repo_id, "token": token, "repo_type": "dataset"}
+def _upload_kwargs(fn: object, repo_id: str, key: str, path: Path, token: str | None) -> dict:
+    """Build upload arguments for whichever huggingface_hub is installed.
+
+    The rename came with a signature change, not just a new name:
+
+        0.x  hf_hub_upload(repo_id, filename, path, token=, repo_type=)
+        1.x  upload_file(path_or_fileobj, path_in_repo, repo_id, token=,
+                         repo_type=)
+
+    Reading the signature beats trying one call and catching TypeError, because
+    a TypeError from deep inside a real upload is indistinguishable from a
+    signature mismatch, and the difference is a file silently not landing.
+
+    `repo_type` is passed in every version. Without it the library defaults to
+    the model namespace, and this repo is a dataset, so the write would be
+    addressed to a repo that does not exist. That is the second bug the live
+    test found.
+    """
+    import inspect
+
+    try:
+        params = set(inspect.signature(fn).parameters)  # type: ignore[arg-type]
+    except (TypeError, ValueError):  # pragma: no cover - builtins have no signature
+        params = set()
+
+    modern = "path_in_repo" in params
+    kwargs: dict = {"repo_id": repo_id, "token": token, "repo_type": "dataset"}
+    if modern:
+        kwargs["path_or_fileobj"] = str(path)
+        kwargs["path_in_repo"] = key
+    else:
+        kwargs["filename"] = key
+        kwargs["path"] = str(path)
+    return kwargs
 
 
 # --------------------------------------------------------------------------
@@ -217,6 +312,7 @@ class HFStore:
         self.private = private
         self._client = client
         self._created = False
+        self._tree: list[dict] | None = None
 
     # -- plumbing ----------------------------------------------------------
 
@@ -251,6 +347,27 @@ class HFStore:
     def _key(self, key: str) -> str:
         return key.strip("/")
 
+    def _api(self, *names: str) -> object:
+        """Find an HfApi method across its renames.
+
+        `file_info` was removed in huggingface_hub 1.x. Calling it raised
+        AttributeError, and every caller here swallowed exceptions, so `exists`
+        answered False for a file that was demonstrably there and `size`
+        answered 0. That is the worst shape of bug: restore_if_present() uses
+        exists() to decide whether to resume, so a restarted container would
+        have silently restarted the whole film from shot one, every time, with
+        no error anywhere.
+        """
+        for name in names:
+            fn = getattr(self.client, name, None)
+            if callable(fn):
+                return fn
+        raise StorageError(
+            f"huggingface_hub has none of {list(names)} on HfApi. The library "
+            f"renamed its metadata methods and the pinned version in the image "
+            f"does not match this code."
+        )
+
     # -- the Store interface -----------------------------------------------
 
     def put(self, key: str, path: str | os.PathLike[str]) -> str:
@@ -260,26 +377,20 @@ class HFStore:
         if src.stat().st_size == 0:
             raise StorageError(f"refusing to upload a 0-byte file: {path}")
         self._ensure_repo()
+        upload = _hf_callable("upload_file", "hf_hub_upload")
         try:
-            from huggingface_hub import hf_hub_upload  # type: ignore[import-not-found]
-
-            hf_hub_upload(
-                repo_id=self.repo_id,
-                filename=self._key(key),
-                path=str(src),
-                token=self.token,
-            )
+            upload(**_upload_kwargs(upload, self.repo_id, self._key(key), src, self.token))
         except Exception as exc:  # noqa: BLE001
             raise StorageError(f"upload of {key} failed: {exc}") from exc
+        self._tree = None
         return key
 
     def get(self, key: str, path: str | os.PathLike[str]) -> str:
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
+        download = _hf_callable("hf_hub_download", "hf_hub_download")
         try:
-            from huggingface_hub import hf_hub_download  # type: ignore[import-not-found]
-
-            local = hf_hub_download(
+            local = download(
                 repo_id=self.repo_id,
                 filename=self._key(key),
                 token=self.token,
@@ -291,60 +402,150 @@ class HFStore:
             out.write_bytes(Path(local).read_bytes())
         return str(out)
 
+    def _api(self, *names: str) -> object:
+        """Find an HfApi method across its renames.
+
+        `file_info` was removed in huggingface_hub 1.x. Calling it raised
+        AttributeError, and every caller here swallowed exceptions, so `exists`
+        answered False for a file that was demonstrably there and `size`
+        answered 0. That is the worst shape of bug: restore_if_present() uses
+        exists() to decide whether to resume, so a restarted container would
+        have silently restarted the whole film from shot one, every time, with
+        no error anywhere.
+        """
+        for name in names:
+            fn = getattr(self.client, name, None)
+            if callable(fn):
+                return fn
+        raise StorageError(
+            f"huggingface_hub has none of {list(names)} on HfApi. The library "
+            f"renamed its metadata methods and the pinned version in the image "
+            f"does not match this code."
+        )
+
     def exists(self, key: str) -> bool:
         try:
-            self.client.file_info(  # type: ignore[attr-defined]
+            return bool(self._api("file_exists")(
                 repo_id=self.repo_id,
                 filename=self._key(key),
                 repo_type="dataset",
                 token=self.token,
-            )
-            return True
-        except Exception:  # noqa: BLE001 - file_info raises on a miss
+            ))
+        except Exception:  # noqa: BLE001 - a miss and a failure both mean "no"
             return False
 
     def delete(self, key: str) -> None:
+        target = self._key(key)
         try:
             self.client.delete_file(  # type: ignore[attr-defined]
-                repo_id=self.repo_id,
-                filename=self._key(key),
-                repo_type="dataset",
-                token=self.token,
+                **_delete_kwargs(self.client.delete_file, self.repo_id, target, self.token)
             )
-        except Exception:  # noqa: BLE001 - deleting something absent is fine
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Deleting something absent is fine. Deleting something present and
+            # reporting nothing is not: an earlier version swallowed every
+            # exception here, and prune() therefore freed nothing while
+            # reporting a saving. A real failure is now a real error.
+            if not self._is_missing(exc):
+                raise StorageError(f"delete of {target} failed: {exc}") from exc
+        self._tree = None
+
+    def delete_many(self, keys: Iterable[str]) -> None:
+        """Delete a set of keys in one commit.
+
+        A finished 2-hour film has around 1900 redundant clips. One commit for
+        all of them is the difference between a prune that takes seconds and
+        one that takes an hour of rate-limited single-file commits.
+        """
+        targets = [self._key(k) for k in keys]
+        if not targets:
+            return
+        batch = getattr(self.client, "delete_files", None)
+        if callable(batch):
+            try:
+                batch(repo_id=self.repo_id, delete_patterns=targets,
+                      repo_type="dataset", token=self.token)
+                self._tree = None
+                return
+            except Exception:  # noqa: BLE001 - fall back to one at a time
+                pass
+        for k in targets:
+            self.delete(k)
+
+    @staticmethod
+    def _is_missing(exc: Exception) -> bool:
+        text = f"{type(exc).__name__} {exc}".lower()
+        return any(w in text for w in ("404", "not found", "does not exist",
+                                       "no such file", "entrynotfound"))
+
+    def _files(self) -> list[dict]:
+        """Every file in the repo with its size, in one request.
+
+        A 2-hour film is about 1900 shots, and the obvious implementation of
+        `size()` is one API call per object, which is 1900 round trips to learn
+        something one listing already knows.
+
+        Folders are filtered out by the absence of a size, not by a type
+        attribute: neither RepoFile nor RepoFolder carries one, so the first
+        version of this counted `f01/clips` as an object. That inflated the
+        usage report and, worse, handed folder names to delete().
+        """
+        if self._tree is None:
+            entries: list[dict] = []
+            try:
+                for e in self._api("list_repo_tree")(
+                    repo_id=self.repo_id,
+                    recursive=True,
+                    expand=True,
+                    repo_type="dataset",
+                    token=self.token,
+                ):
+                    size = getattr(e, "size", None)
+                    if size is None:            # a folder, not a file
+                        continue
+                    path = str(getattr(e, "path", ""))
+                    if not path or path.startswith("."):  # .gitattributes and friends
+                        continue
+                    entries.append({"path": path, "size": int(size or 0)})
+            except Exception:  # noqa: BLE001
+                entries = []
+            self._tree = entries
+        return self._tree
+
+    def sizes(self) -> dict[str, int]:
+        return {f["path"]: f["size"] for f in self._files()}
 
     def list(self, prefix: str) -> Iterator[str]:
-        try:
-            files = self.client.list_repo_files(  # type: ignore[attr-defined]
-                repo_id=self.repo_id, repo_type="dataset", token=self.token
-            )
-        except Exception:  # noqa: BLE001 - an empty or new repo lists nothing
-            return iter(())
         want = self._key(prefix)
-        return iter(
-            f for f in files
-            if f.startswith(want) and not f.endswith((".gitattributes",))
-        )
+        return iter(p for p in self.sizes() if p.startswith(want))
 
     def size(self, key: str) -> int:
+        """Bytes behind one key.
+
+        The listing is the answer, because one request already carries every
+        size in the repo. A single-file lookup is only used when the listing
+        cannot be read at all.
+        """
+        target = self._key(key)
+        cached = self.sizes()
+        if target in cached:
+            return cached[target]
         try:
-            info = self.client.file_info(  # type: ignore[attr-defined]
+            infos = self._api("get_paths_info")(
                 repo_id=self.repo_id,
-                filename=self._key(key),
-                files_metadata=True,
+                paths=target,
+                expand=True,
                 repo_type="dataset",
                 token=self.token,
             )
-            return int(getattr(info, "size", 0) or 0)
+            for info in infos or []:
+                if str(getattr(info, "path", "")) == target:
+                    return int(getattr(info, "size", 0) or 0)
         except Exception:  # noqa: BLE001
             return 0
+        return 0
 
     def total_used(self) -> int:
-        total = 0
-        for key in self.list(""):
-            total += self.size(key)
-        return total
+        return sum(self.sizes().values())
 
 
 # --------------------------------------------------------------------------
@@ -392,6 +593,12 @@ class S3Store:
     def _k(self, key: str) -> str:
         return f"{self.prefix}/{key}" if self.prefix else key
 
+    def _strip(self, key: str) -> str:
+        """Object key back to the layout key the pipeline uses."""
+        if self.prefix and key.startswith(f"{self.prefix}/"):
+            return key[len(self.prefix) + 1:]
+        return key
+
     def put(self, key: str, path: str | os.PathLike[str]) -> str:
         src = Path(path)
         if not src.exists():
@@ -438,6 +645,21 @@ class S3Store:
             total += sum(int(o.get("Size", 0)) for o in page.get("Contents", []) or [])
             if not page.get("IsTruncated"):
                 return total
+            token = page.get("NextContinuationToken")
+
+    def sizes(self) -> dict[str, int]:  # pragma: no cover - needs a live bucket
+        """Every key with its size, from the listing that already carries them."""
+        out: dict[str, int] = {}
+        token = None
+        while True:
+            kwargs = {"Bucket": self.bucket, "Prefix": self._k("")}
+            if token:
+                kwargs["ContinuationToken"] = token
+            page = self.client.list_objects_v2(**kwargs)
+            for o in page.get("Contents", []) or []:
+                out[self._strip(o["Key"])] = int(o.get("Size", 0))
+            if not page.get("IsTruncated"):
+                return out
             token = page.get("NextContinuationToken")
 
     def delete(self, key: str) -> None:  # pragma: no cover
@@ -519,8 +741,14 @@ def prune(store: Store, layout: Layout) -> dict[str, int]:
     freed = prunable(store, layout)
     if not freed["objects"]:
         return freed
-    for key in list(store.list(layout.key_prefix())):
-        if any(f"/{k}/" in key for k in ("clips", "audio", "frames")):
+    doomed = [
+        key for key in store.list(layout.key_prefix())
+        if any(f"/{k}/" in key for k in ("clips", "audio", "frames"))
+    ]
+    if hasattr(store, "delete_many"):
+        store.delete_many(doomed)  # type: ignore[attr-defined]
+    else:
+        for key in doomed:
             store.delete(key)
     return freed
 
