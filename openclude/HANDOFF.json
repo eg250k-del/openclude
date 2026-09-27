@@ -1,7 +1,7 @@
 {
     "version":  "0.1.0",
-    "updated":  "2026-09-27",
-    "headline":  "Orchestration engine complete and verified. No GPU, no network, no ffmpeg yet.",
+    "updated":  "2026-09-28",
+    "headline":  "Image built and pushed. All four pipeline stages have real implementations. Nothing deployed to SaladCloud yet.",
     "verified":  {
                      "tests":  327,
                      "skipped":  4,
