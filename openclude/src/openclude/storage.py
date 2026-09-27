@@ -152,6 +152,17 @@ class LocalStore:
     def exists(self, key: str) -> bool:
         return self._p(key).exists()
 
+    def size(self, key: str) -> int:
+        p = self._p(key)
+        return p.stat().st_size if p.exists() else 0
+
+    def total_used(self) -> int:
+        total = 0
+        for f in self.root.rglob("*"):
+            if f.is_file():
+                total += f.stat().st_size
+        return total
+
     def delete(self, key: str) -> None:
         self._p(key).unlink(missing_ok=True)
 
@@ -240,6 +251,25 @@ class S3Store:
         except Exception:  # noqa: BLE001 - head_object raises a client error
             return False
 
+    def size(self, key: str) -> int:  # pragma: no cover - needs a live bucket
+        """Bytes behind one key. Used by the storage doctor."""
+        head = self.client.head_object(Bucket=self.bucket, Key=self._k(key))
+        return int(head.get("ContentLength", 0))
+
+    def total_used(self) -> int:  # pragma: no cover - needs a live bucket
+        """Total bytes in the bucket. One pass, so the doctor is cheap."""
+        total = 0
+        token = None
+        while True:
+            kwargs = {"Bucket": self.bucket, "Prefix": self._k("")}
+            if token:
+                kwargs["ContinuationToken"] = token
+            page = self.client.list_objects_v2(**kwargs)
+            total += sum(int(o.get("Size", 0)) for o in page.get("Contents", []) or [])
+            if not page.get("IsTruncated"):
+                return total
+            token = page.get("NextContinuationToken")
+
     def delete(self, key: str) -> None:  # pragma: no cover
         self.client.delete_object(Bucket=self.bucket, Key=self._k(key))
 
@@ -278,6 +308,51 @@ def restore_if_present(
     if not store.exists(key):
         return None
     return store.get(key, path)
+
+
+# --------------------------------------------------------------------------
+# pruning
+# --------------------------------------------------------------------------
+
+
+def prunable(
+    store: Store, layout: Layout
+) -> dict[str, int]:
+    """What can be deleted, and how much it frees.
+
+    A film is only prunable when its final mp4 exists, because the whole point
+    of pruning is to reclaim space from things that are already redundant. A
+    half-finished film has clips that are the ONLY copy of the work, and
+    deleting those is how you lose a film you paid to render.
+
+    The ledger and the final film are never touched: the ledger is kilobytes
+    and is what makes a re-run possible.
+    """
+    freed = {"clips": 0, "audio": 0, "frames": 0, "objects": 0}
+    if not store.exists(layout.key_film()):
+        return freed
+    for key in store.list(layout.key_prefix()):
+        size = store.size(key) if hasattr(store, "size") else 0
+        for kind in ("clips", "audio", "frames"):
+            if f"/{kind}/" in key:
+                freed[kind] += size
+                freed["objects"] += 1
+    return freed
+
+
+def prune(store: Store, layout: Layout) -> dict[str, int]:
+    """Delete the clips, narration and continuity frames of finished films.
+
+    Never touches the final mp4 or the ledger. Idempotent: a second call finds
+    nothing left to do.
+    """
+    freed = prunable(store, layout)
+    if not freed["objects"]:
+        return freed
+    for key in list(store.list(layout.key_prefix())):
+        if any(f"/{k}/" in key for k in ("clips", "audio", "frames")):
+            store.delete(key)
+    return freed
 
 
 def film_progress(store: Store, layout: Layout) -> dict[str, int]:
