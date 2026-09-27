@@ -30,6 +30,7 @@ from .engine import EnginePaths, WanGPAdapter
 from .pipeline import Config, Pipeline
 from .state import Ledger
 from .storage import Layout, LocalStore, S3Store
+from .storage_doctor import build_store
 
 log = logging.getLogger("openclude.worker")
 
@@ -223,7 +224,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    store = S3Store(os.environ.get("S3_BUCKET", ""))
+    store = build_store()
     STATE.detail = "connecting to the engine"
 
     adapter = WanGPAdapter(

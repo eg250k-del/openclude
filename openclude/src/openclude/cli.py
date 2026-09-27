@@ -33,6 +33,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("No HANDOFF.json found. Run the test suite to confirm the build.")
         return 1
 
+    print()
+    print("  A NEW SESSION: read openclude/START-HERE.md first. It has a")
+    print("  copy-pasteable resume prompt and the locked decisions.")
+
     print("=" * 72)
     print(f"  openclude {h.get('version', __version__)}")
     print(f"  {h.get('headline', '')}")
@@ -105,47 +109,66 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_store(args: argparse.Namespace) -> int:
-    """Report the object store, and how much room is left on the free tier."""
+    """Report the object store, and how much room is left."""
     import os
 
-    from .storage import S3Store
-    from .storage_doctor import FREE_TIER_GB, describe, env_summary, measure
+    from .storage_doctor import (
+        FREE_TIER_GB,
+        build_store,
+        describe,
+        how_to_configure,
+        measure,
+        required_env,
+        selected_backend,
+    )
 
-    have = env_summary()
     print("STORAGE DOCTOR\n")
-    for key, ok in have.items():
-        print(f"  {key:<20} {'set' if ok else 'MISSING'}")
-    missing = [k for k, ok in have.items() if not ok]
+    try:
+        backend = selected_backend()
+    except RuntimeError as exc:
+        print(f"  {exc}")
+        return 1
+    print(f"  {'backend':<20} {backend}")
+
+    for key in ("OPENCLIDE_STORE", "HF_REPO", "HF_TOKEN", "S3_ENDPOINT",
+                "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"):
+        print(f"  {key:<20} {'set' if os.environ.get(key) else '-'}")
+
+    missing = [k for k in required_env(backend) if not os.environ.get(k)]
     if missing:
         print()
         print("  Not configured. Nothing else can run: SaladCloud deletes a")
         print("  container's disk when it stops, so the ledger and the clips")
         print("  would vanish with it.")
         print()
-        print("  Free, no credit card, 10 GB:")
-        print("    1. cloudflare.com -> Sign up (free)")
-        print("    2. left menu -> R2 -> Create a bucket -> name it 'openclude'")
-        print("    3. R2 -> Manage R2 API Tokens -> Create Account API Token")
-        print("       -> permissions: Object Read & Write -> scope this bucket")
-        print("       -> copy the Access Key ID, Secret, and the endpoint URL")
-        print()
-        print("  Then set them in your shell and run this again.")
+        for line in how_to_configure(backend):
+            print(f"  {line}")
         return 1
 
-    bucket = os.environ["S3_BUCKET"]
-    print(f"  {'bucket':<20} {bucket}")
-    print(f"  {'free tier':<20} {FREE_TIER_GB:.0f} GB")
     try:
-        store = S3Store(bucket)
+        store = build_store(backend)
         usage = measure(store)
     except Exception as exc:  # noqa: BLE001
         print()
         print(f"  UNREACHABLE: {type(exc).__name__}: {exc}")
-        print("  Check the endpoint URL, the key, and that the bucket exists.")
         return 1
 
     print()
+    print(f"  {'target':<20} {getattr(store, 'repo_id', None) or getattr(store, 'bucket', None) or store.root}")
+    print(f"  {'free tier':<20} {FREE_TIER_GB:.0f} GB")
+    print()
     print(describe(usage, seconds_of_film=120.0, shots=400))
+
+    if backend == "local":
+        # Not an error: the local backend is right for development and for the
+        # offline demo. But it has to say plainly that it is not durable,
+        # because the only way to find out otherwise is to lose a film.
+        print()
+        print("  NOT DURABLE. This is a folder on one machine.")
+        print("  SaladCloud deletes a container's disk the moment it stops, so")
+        print("  on Salad this backend loses the ledger and every clip.")
+        for line in how_to_configure("local"):
+            print(f"  {line}")
     return 0
 
 

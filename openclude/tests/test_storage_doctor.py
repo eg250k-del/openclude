@@ -194,21 +194,20 @@ def _cli(*argv: str) -> tuple[int, str]:
     return code, buf.getvalue()
 
 
-def test_store_without_credentials_gives_instructions(monkeypatch) -> None:
-    for k in ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"):
+def test_store_points_at_a_backend_when_nothing_is_configured(monkeypatch) -> None:
+    """Once a backend is named, this one goes away.
+
+    R2 was the first answer and it was wrong: the checkout stops at a payment
+    form, and the user has no card. So the instruction text now names the
+    backends that actually work instead of one that does not.
+    """
+    for k in ("OPENCLIDE_STORE", "HF_REPO", "S3_BUCKET", "S3_ENDPOINT"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OPENCLIDE_STORE", "hf")
     code, out = _cli("store")
     assert code == 1
-    assert "MISSING" in out
-    assert "cloudflare" in out.lower()
-    assert "no credit card" in out.lower()
-
-
-def test_store_instructions_name_the_ten_gigabyte_free_tier(monkeypatch) -> None:
-    for k in ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"):
-        monkeypatch.delenv(k, raising=False)
-    _, out = _cli("store")
-    assert "10 GB" in out
+    assert "huggingface.co" in out
+    assert "cloudflare" not in out.lower()
 
 
 def test_store_never_prints_a_secret(monkeypatch) -> None:

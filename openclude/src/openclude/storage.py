@@ -178,7 +178,177 @@ class LocalStore:
 
 
 # --------------------------------------------------------------------------
-# S3-compatible, which is what the container actually uses
+# Hugging Face Hub
+# --------------------------------------------------------------------------
+
+
+class HFStore:
+    """Hugging Face Hub, used as a plain file store.
+
+    This exists because it is the only option that needs no credit card. The
+    other candidates all do: Cloudflare R2 stops at a payment form, Backblaze
+    B2 the same, and Google Cloud Storage requires a billing account even for
+    its perpetual free tier. HF is free, private repos are free, and there is
+    no card step.
+
+    The decisive practical point is that `huggingface_hub` is ALREADY in the
+    image. The engine installs it to fetch model weights, so this backend needs
+    no new dependency and no new failure surface. We are reusing the tool that
+    was already there for the model's sake.
+
+    Layout mirrors a repo: a directory tree of files, addressed by path. A
+    prefix lists a folder, exactly like the S3 backend, so the pipeline does
+    not know which one it has.
+    """
+
+    def __init__(
+        self,
+        repo_id: str,
+        token: str | None = None,
+        private: bool = True,
+        client: object | None = None,
+    ) -> None:
+        if not repo_id or "/" not in repo_id:
+            raise StorageError(
+                f"HF_REPO must look like 'username/repo-name', got {repo_id!r}"
+            )
+        self.repo_id = repo_id
+        self.token = token or os.environ.get("HF_TOKEN", "") or None
+        self.private = private
+        self._client = client
+        self._created = False
+
+    # -- plumbing ----------------------------------------------------------
+
+    @property
+    def client(self) -> object:
+        if self._client is None:
+            try:
+                from huggingface_hub import HfApi  # type: ignore[import-not-found]
+            except ImportError as exc:
+                raise StorageError(
+                    "huggingface_hub is not installed. It is part of the engine's "
+                    "requirements, so this should not happen in the image."
+                ) from exc
+            self._client = HfApi(token=self.token)
+        return self._client
+
+    def _ensure_repo(self) -> None:
+        """Create the repo on first write. Idempotent."""
+        if self._created:
+            return
+        try:
+            self.client.create_repo(  # type: ignore[attr-defined]
+                repo_id=self.repo_id, private=self.private, exist_ok=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(
+                f"cannot create or reach the HF repo {self.repo_id!r}: {exc}\n"
+                f"  Check that HF_TOKEN is set and the token has write access."
+            ) from exc
+        self._created = True
+
+    def _key(self, key: str) -> str:
+        return key.strip("/")
+
+    # -- the Store interface -----------------------------------------------
+
+    def put(self, key: str, path: str | os.PathLike[str]) -> str:
+        src = Path(path)
+        if not src.exists():
+            raise StorageError(f"cannot upload {path}: no such file")
+        if src.stat().st_size == 0:
+            raise StorageError(f"refusing to upload a 0-byte file: {path}")
+        self._ensure_repo()
+        try:
+            from huggingface_hub import hf_hub_upload  # type: ignore[import-not-found]
+
+            hf_hub_upload(
+                repo_id=self.repo_id,
+                filename=self._key(key),
+                path=str(src),
+                token=self.token,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(f"upload of {key} failed: {exc}") from exc
+        return key
+
+    def get(self, key: str, path: str | os.PathLike[str]) -> str:
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from huggingface_hub import hf_hub_download  # type: ignore[import-not-found]
+
+            local = hf_hub_download(
+                repo_id=self.repo_id,
+                filename=self._key(key),
+                token=self.token,
+                repo_type="dataset",
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise StorageError(f"{key} is not in {self.repo_id}: {exc}") from exc
+        if str(Path(local).resolve()) != str(out.resolve()):
+            out.write_bytes(Path(local).read_bytes())
+        return str(out)
+
+    def exists(self, key: str) -> bool:
+        try:
+            self.client.file_info(  # type: ignore[attr-defined]
+                repo_id=self.repo_id,
+                filename=self._key(key),
+                repo_type="dataset",
+                token=self.token,
+            )
+            return True
+        except Exception:  # noqa: BLE001 - file_info raises on a miss
+            return False
+
+    def delete(self, key: str) -> None:
+        try:
+            self.client.delete_file(  # type: ignore[attr-defined]
+                repo_id=self.repo_id,
+                filename=self._key(key),
+                repo_type="dataset",
+                token=self.token,
+            )
+        except Exception:  # noqa: BLE001 - deleting something absent is fine
+            pass
+
+    def list(self, prefix: str) -> Iterator[str]:
+        try:
+            files = self.client.list_repo_files(  # type: ignore[attr-defined]
+                repo_id=self.repo_id, repo_type="dataset", token=self.token
+            )
+        except Exception:  # noqa: BLE001 - an empty or new repo lists nothing
+            return iter(())
+        want = self._key(prefix)
+        return iter(
+            f for f in files
+            if f.startswith(want) and not f.endswith((".gitattributes",))
+        )
+
+    def size(self, key: str) -> int:
+        try:
+            info = self.client.file_info(  # type: ignore[attr-defined]
+                repo_id=self.repo_id,
+                filename=self._key(key),
+                files_metadata=True,
+                repo_type="dataset",
+                token=self.token,
+            )
+            return int(getattr(info, "size", 0) or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def total_used(self) -> int:
+        total = 0
+        for key in self.list(""):
+            total += self.size(key)
+        return total
+
+
+# --------------------------------------------------------------------------
+# S3-compatible, which is what the container uses when it is configured
 # --------------------------------------------------------------------------
 
 

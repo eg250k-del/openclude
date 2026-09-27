@@ -30,16 +30,48 @@ log "cleared any crash lock"
 
 # ------------------------------------------------------------- 2. durable disk
 # This is the check that would have saved the models lost earlier. If the store
-# is not mounted, refuse to start rather than render into a disk that vanishes.
+# is not configured, refuse to start rather than render into a disk that vanishes.
+#
+# Any backend counts. Hugging Face is the default because the user has no credit
+# card and R2's checkout requires one.
 if [ "${OPENCLIDE_REQUIRE_STORE:-1}" = "1" ]; then
-  if [ -z "${S3_ENDPOINT:-}" ] && [ -z "${S3_ACCESS_KEY_ID:-}" ]; then
-    log "FATAL: no object storage configured."
-    log "  SaladCloud filesystems are ephemeral. Set S3_ENDPOINT,"
-    log "  S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or set"
-    log "  OPENCLIDE_REQUIRE_STORE=0 for a throwaway local run."
+  BACKEND="${OPENCLIDE_STORE:-}"
+  if [ -z "${BACKEND}" ]; then
+    if [ -n "${HF_REPO:-}" ]; then BACKEND=hf
+    elif [ -n "${S3_BUCKET:-}" ]; then BACKEND=s3
+    else BACKEND=local
+    fi
+  fi
+
+  if [ "${BACKEND}" = "hf" ]; then
+    if [ -z "${HF_REPO:-}" ] || [ -z "${HF_TOKEN:-}" ]; then
+      log "FATAL: OPENCLIDE_STORE=hf needs HF_REPO and HF_TOKEN."
+      exit 78
+    fi
+  elif [ "${BACKEND}" = "s3" ]; then
+    if [ -z "${S3_ENDPOINT:-}" ] || [ -z "${S3_BUCKET:-}" ] \
+       || [ -z "${S3_ACCESS_KEY_ID:-}" ] || [ -z "${S3_SECRET_ACCESS_KEY:-}" ]; then
+      log "FATAL: OPENCLIDE_STORE=s3 needs S3_ENDPOINT, S3_BUCKET,"
+      log "  S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY."
+      exit 78
+    fi
+  elif [ "${BACKEND}" != "local" ]; then
+    log "FATAL: OPENCLIDE_STORE=${BACKEND} is not one of local, s3, hf."
+    exit 78
+  fi
+
+  if [ "${BACKEND}" = "local" ]; then
+    log "FATAL: no durable object storage configured."
+    log "  SaladCloud filesystems are ephemeral: a container's disk is deleted"
+    log "  the moment it stops, so the ledger and every clip would go with it."
+    log "  Free and no credit card: create a private HF dataset repo and set"
+    log "  HF_REPO=<user>/<repo> and HF_TOKEN, or set OPENCLIDE_REQUIRE_STORE=0"
+    log "  for a throwaway run you are willing to lose."
     exit 78   # EX_CONFIG
   fi
-  log "object storage configured"
+
+  log "object storage backend: ${BACKEND}"
+  export OPENCLIDE_STORE="${BACKEND}"
 fi
 
 mkdir -p "${DATA}"/{ckpts,loras,outputs,frames,audio,cache,config,work}
@@ -58,9 +90,14 @@ sys.exit(0 if torch.cuda.is_available() else 1)
 PY
 
 # ---------------------------------------------------------------- 4. weights
-# Fetched through the engine so the URL list lives in defaults/*.json. Skipped
-# when the files are already present, which is the normal case after the first
-# run, because ckpts/ is store-backed.
+# Fetched through the engine so the URL list lives in defaults/*.json.
+#
+# Weights are deliberately NOT put in object storage. They are public on
+# HuggingFace and total roughly 15 GB, which is more than any free tier offers,
+# and a container is scheduled onto a fresh node often enough that the download
+# is paid for regularly. 15 GB at the node speeds Salad reports is about three
+# minutes, which is cheaper than owning a bucket big enough to hold them.
+# Downloads are skipped when the files are already on this node's disk.
 if [ "${OPENCLIDE_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
   log "ensuring model weights for ${MODEL}"
   python3.11 - "$ENGINE" "$MODEL" <<'PY' || log "WARNING: weight prefetch failed; the render stage will retry"

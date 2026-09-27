@@ -137,3 +137,81 @@ def env_summary() -> dict[str, bool]:
         "S3_ACCESS_KEY_ID": bool(os.environ.get("S3_ACCESS_KEY_ID")),
         "S3_SECRET_ACCESS_KEY": bool(os.environ.get("S3_SECRET_ACCESS_KEY")),
     }
+
+
+# --------------------------------------------------------------------------
+# backend selection
+# --------------------------------------------------------------------------
+
+LOCAL = "local"
+S3 = "s3"
+HF = "hf"
+
+BACKENDS = (LOCAL, S3, HF)
+
+
+def selected_backend() -> str:
+    """Which store the environment asks for. Never guessed."""
+    mode = os.environ.get("OPENCLIDE_STORE", "").strip().lower()
+    if mode:
+        if mode not in BACKENDS:
+            raise RuntimeError(
+                f"OPENCLIDE_STORE={mode!r} is not one of {BACKENDS}"
+            )
+        return mode
+    if os.environ.get("HF_REPO"):
+        return HF
+    if os.environ.get("S3_BUCKET"):
+        return S3
+    return LOCAL
+
+
+def required_env(backend: str) -> tuple[str, ...]:
+    return {
+        LOCAL: (),
+        HF: ("HF_REPO", "HF_TOKEN"),
+        S3: ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"),
+    }[backend]
+
+
+def build_store(backend: str | None = None) -> Any:
+    """Construct the store the environment describes."""
+    from .storage import HFStore, LocalStore, S3Store
+
+    backend = backend or selected_backend()
+    missing = [k for k in required_env(backend) if not os.environ.get(k)]
+    if missing:
+        raise RuntimeError(
+            f"backend {backend!r} needs {', '.join(missing)}, which are not set"
+        )
+    if backend == LOCAL:
+        return LocalStore(os.environ.get("OPENCLIDE_LOCAL", "store"))
+    if backend == HF:
+        return HFStore(os.environ["HF_REPO"])
+    return S3Store(os.environ["S3_BUCKET"])
+
+
+def how_to_configure(backend: str) -> list[str]:
+    """Step-by-step, in the order the operator has to click."""
+    if backend == HF:
+        return [
+            "Hugging Face, free, no credit card:",
+            "  1. huggingface.co -> Create an account (free)",
+            "  2. the new account -> New dataset -> name it anything",
+            "     (a dataset repo, not a model repo: it is a file store)",
+            "  3. Settings on that dataset -> Access Tokens -> Create",
+            "     -> give it Write permission -> copy the token",
+            "  4. set HF_REPO=<your-username>/<dataset-name> and HF_TOKEN=<token>",
+            "     then run this command again",
+        ]
+    if backend == S3:
+        return [
+            "S3-compatible storage (any provider):",
+            "  set S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY",
+            "  then run this command again",
+        ]
+    return [
+        "Nothing here survives a container. For a real run set one of:",
+        "  OPENCLIDE_STORE=hf  with HF_REPO and HF_TOKEN   (free, no card)",
+        "  OPENCLIDE_STORE=s3  with the four S3_* variables",
+    ]

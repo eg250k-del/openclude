@@ -12,8 +12,8 @@ import pytest
 from openclude.storage import LocalStore, Layout, prunable, prune
 
 
-def seed(store: LocalStore, layout: Layout, *, with_film: bool, n: int = 3) -> None:
-    src = Path("x") if False else None  # placeholder to keep the signature short
+def seed(store, layout: Layout, *, with_film: bool, n: int = 3) -> None:
+    """Fill a store with a film's worth of files."""
     import tempfile
     from pathlib import Path as P
 
@@ -28,14 +28,9 @@ def seed(store: LocalStore, layout: Layout, *, with_film: bool, n: int = 3) -> N
         f2 = tmp / "film.mp4"
         f2.write_bytes(b"\x00" * 5000)
         store.put(layout.key_film(), f2)
-    from pathlib import Path as P2
-
     state = tmp / "ledger.json"
     state.write_text("{}", encoding="utf-8")
     store.put(layout.key_state(), state)
-
-
-from pathlib import Path  # noqa: E402
 
 
 # --------------------------------------------------------------------------

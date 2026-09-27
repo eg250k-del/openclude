@@ -222,6 +222,12 @@ def group_spec(cfg: Config) -> dict[str, Any]:
                 "WAN2GP_ATTENTION": "sage2",
                 "OPENCLIDE_REQUIRE_STORE": "1",
                 "HF_HUB_DISABLE_TELEMETRY": "1",
+                # Which durable backend. Passed through rather than decided here
+                # so the same image runs on any of them, and so a preflight can
+                # check the credentials before an instance is ever scheduled.
+                "OPENCLIDE_STORE": os.environ.get("OPENCLIDE_STORE", ""),
+                "HF_REPO": os.environ.get("HF_REPO", ""),
+                "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
                 "S3_ENDPOINT": os.environ.get("S3_ENDPOINT", ""),
                 "S3_BUCKET": os.environ.get("S3_BUCKET", ""),
                 "S3_ACCESS_KEY_ID": os.environ.get("S3_ACCESS_KEY_ID", ""),
