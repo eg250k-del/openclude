@@ -1,2 +1,27 @@
 ﻿node_modules/
 *.log
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# openclude runtime artefacts — these are outputs, not source
+openclude/work/
+openclude/out/
+openclude/clips/
+openclude/frames/
+openclude/*.mp4
+openclude/state/
+*.egg-info/
+
+# local secrets
+.env
+.env.*
+!.env.example

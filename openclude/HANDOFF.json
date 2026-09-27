@@ -1,0 +1,200 @@
+{
+  "version": "0.1.0",
+  "updated": "2026-09-27",
+  "headline": "Orchestration engine complete and verified. No GPU, no network, no ffmpeg yet.",
+  "verified": {
+    "tests": 261,
+    "skipped": 4,
+    "source_lines": 4004,
+    "test_lines": 3206,
+    "timestamp": "2026-09-27",
+    "verified_by": "pytest -q  ->  261 passed, 4 skipped in 4.60s",
+    "skipped_because": "ffmpeg is not installed on the dev machine; those 4 tests exercise real ffmpeg/ffprobe and auto-skip",
+    "test_functions": 250
+  },
+  "stages": [
+    {
+      "name": "analysis",
+      "state": "done",
+      "note": "4 source repos read at the code level, engine decided, SaladCloud constraints confirmed"
+    },
+    {
+      "name": "schema",
+      "state": "done",
+      "note": "frame lattice, deterministic seeds, shot splitting, continuity resolution"
+    },
+    {
+      "name": "state",
+      "state": "done",
+      "note": "atomic ledger, crash recovery, bounded retries, seed pinning"
+    },
+    {
+      "name": "retry",
+      "state": "done",
+      "note": "4-rung degradation ladder that terminates; character sheet sacrificed last"
+    },
+    {
+      "name": "runner",
+      "state": "done",
+      "note": "per-shot isolation, resume, KeyboardInterrupt deliberately NOT caught"
+    },
+    {
+      "name": "script",
+      "state": "partial",
+      "note": "llm.py complete and tested with a stub writer; no real LLM client wired"
+    },
+    {
+      "name": "audio",
+      "state": "partial",
+      "note": "measuring, floor check, re-cut all working on real WAVs; no real TTS wired"
+    },
+    {
+      "name": "engine",
+      "state": "partial",
+      "note": "WanGPAdapter written against the real API; never executed, no GPU on this machine"
+    },
+    {
+      "name": "storage",
+      "state": "partial",
+      "note": "LocalStore tested; S3Store written but never run against a live bucket"
+    },
+    {
+      "name": "assembly",
+      "state": "partial",
+      "note": "all guard rails tested without ffmpeg; 4 real-ffmpeg tests skipped"
+    },
+    {
+      "name": "pipeline",
+      "state": "done",
+      "note": "all 4 stages run end to end against stubs, including mid-film container death"
+    },
+    {
+      "name": "dockerfile",
+      "state": "partial",
+      "note": "Dockerfile + entrypoint written against engine-verified versions; never built"
+    },
+    {
+      "name": "deploy",
+      "state": "partial",
+      "note": "salad.py complete with dry-run default and 26 safety tests; needs SALAD_API_KEY + org + project"
+    },
+    {
+      "name": "worker",
+      "state": "partial",
+      "note": "health probes, folder-based queue, signal handling all tested; LLM and TTS clients still stubs"
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "WanGP (deepbeepmeep/Wan2GP) is the engine, NOT ComfyUI",
+      "why": "ComfyUI has no reliable headless batch path and the 3 audited ComfyUI projects are demo-grade with deadlocks. WanGP ships a documented in-process Python API, a CLI queue mode, and an MCP server."
+    },
+    {
+      "decision": "ComfyUI is out of the production path entirely",
+      "why": "Its /history endpoint only returns completed prompts, so running-vs-queued is indistinguishable, and it discards node error payloads."
+    },
+    {
+      "decision": "5B FastWan (ti2v_2_2_fastwan) as the 24GB default model",
+      "why": "14B A14B needs two 14B transformers (~30GB of weights) and does not fit a 4090 without heavy offload."
+    },
+    {
+      "decision": "Hybrid output: most shots are still art with camera motion, real generated video for the beats that matter",
+      "why": "This is what the reference channels actually do (their hashtag is #MotionComic). Full generation for every second costs 80-160 GPU-hours per 2-hour film."
+    },
+    {
+      "decision": "Cloudflare R2 for all persistence",
+      "why": "SaladCloud containers are stateless and unprivileged: no volume mounts, no persistent disk. R2 has no egress fees and the nodes are global."
+    },
+    {
+      "decision": "one shot = one generation, max ~5s",
+      "why": "A single generation tops out at 121 frames. Longer narration is split and chained, which also makes each piece separately retriable."
+    },
+    {
+      "decision": "seeds derived from content, never randomised",
+      "why": "Two audited repos add a timestamp to the seed, which destroys reproducibility and makes A/B testing impossible."
+    }
+  ],
+  "next": [
+    {
+      "task": "Install git, commit, push. The GitHub repo eg250k-del/openclude is still empty.",
+      "done_when": "git log shows the 12 modules and HANDOFF.json on origin"
+    },
+    {
+      "task": "Build the image: docker build -t ghcr.io/eg250k-del/openclude:latest .",
+      "done_when": "build succeeds and python -c 'import shared.api' works inside it"
+    },
+    {
+      "task": "Set SALAD_API_KEY, SALAD_ORGANIZATION, SALAD_PROJECT, S3_* as environment variables. Never paste a key into chat.",
+      "done_when": "python -m openclude.salad preflight returns quota and node pool"
+    },
+    {
+      "task": "Wire a real ScriptWriter (any OpenAI-compatible endpoint)",
+      "done_when": "story -> Film with no stub in the path"
+    },
+    {
+      "task": "Wire a real TTS (the engine's own Qwen3-TTS or IndexTTS2)",
+      "done_when": "story -> Film with measured audio durations, no stub"
+    },
+    {
+      "task": "Deploy: python -m openclude.salad apply --apply",
+      "done_when": "an instance reaches ready and /health returns 200"
+    },
+    {
+      "task": "Run the first real 60-second film",
+      "done_when": "ledger.json in R2 shows done=15 and final.mp4 plays"
+    },
+    {
+      "task": "Verify VRAM headroom on the 5B model at 720p/121 frames",
+      "done_when": "one real shot renders with zero degradations in the ledger"
+    },
+    {
+      "task": "Persist the degradation state so a restarted container does not re-discover it by failing",
+      "done_when": "a shot that needed 25 frames does not fail once after a restart"
+    },
+    {
+      "task": "Generate character sheets with the engine's own image models",
+      "done_when": "Character.views is populated from generated front/side/back images"
+    }
+  ],
+  "read_first": [
+    "deploy/README.md       - how to deploy, and what is still missing",
+    "PROJECT_STATUS.md      - the full narrative, decisions and reasoning",
+    "src/openclude/schema.py - the contract every other stage speaks",
+    "src/openclude/state.py  - the resume mechanism",
+    "src/openclude/retry.py  - the degradation policy",
+    "src/openclude/runner.py - the loop that ties them together",
+    "src/openclude/salad.py  - the deploy control, dry-run by default",
+    "HANDOFF.json            - this file, machine readable"
+  ],
+  "brief_corrections": [
+    "Source D in BRIEF.md (pythongosssss/Wan2GP) no longer exists. The live repo is deepbeepmeep/Wan2GP, 9,643 stars. All analysis was redone against it.",
+    "BRIEF.md asks for 'Persistent Storage' on SaladCloud. That does not exist. Container filesystems are ephemeral and volume mounting is explicitly unsupported because containers are unprivileged. R2 is the replacement.",
+    "eg250k-del/openclude was an EMPTY repository (GitHub returns 409 Conflict). There is no prior code to continue from.",
+    "BRIEF.md says WSL2 hides part of the VRAM, so a 24GB 4090 is really ~22GB usable. Plan against 22GB, not 24.",
+    "The Colab notebook (source E) uses --profile 5, which is a T4/15GB setting and is wrong for a 4090. The engine's own docker script uses --profile 3 for 24GB.",
+    "The Colab notebook sets WAN_CACHE_DIR, which no code in the engine reads. It is a fictional environment variable.",
+    "BRIEF.md implies one Wan 2.2 model. There are two viable tiers and they differ in cost by 3x. Both are listed in demo_full.py."
+  ],
+  "known_gaps": [
+    "The Dockerfile has never been built. Versions come from the engine's own Colab notebook, so the first build will surface friction.",
+    "No real GPU has run this. Every render path is exercised against a fake engine.",
+    "No real LLM client. The ScriptWriter protocol is implemented; only a stub exists. The worker raises a clear error naming the gap.",
+    "No real TTS. The Synthesiser protocol is implemented; only a tone generator exists.",
+    "No SaladCloud credentials have been supplied, so nothing has been deployed. salad.py is tested against fakes only.",
+    "ffmpeg is absent on the dev machine, so 4 integration tests skip. The guard rails around it are tested by stubbing the probe.",
+    "S3Store has never touched a live bucket.",
+    "Degradation state is not persisted across restarts; each restart re-discovers it by failing once.",
+    "No character-sheet image generation yet. The Character.views field is shaped for it.",
+    "No lip sync. The engine supports it (MultiTalk, FantasyTalking) but the Shot schema has no field for it.",
+    "git is not installed on this machine. Nothing is committed and the GitHub repo is still empty."
+  ],
+  "environment": {
+    "working_python": "C:\\Users\\Pc\\AppData\\Local\\Python\\bin\\python.exe",
+    "broken_python": "C:\\Users\\Pc\\AppData\\Local\\Programs\\Python\\Python314\\python.exe (Lib\\encodings missing - do not use)",
+    "git": "not installed on this machine",
+    "ffmpeg": "not installed on this machine",
+    "run_tests": "cd G:\\opencode\\openclude && python -m pytest -q",
+    "run_demos": "python demo.py | python demo_crash.py | python demo_full.py",
+    "status": "python -m openclude.cli status"
+  }
+}

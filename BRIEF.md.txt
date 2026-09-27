@@ -1,0 +1,97 @@
+# AI Animation Production Machine — Project Brief
+
+الحالة: مرحلة التحليل — لا تنفيذ بعد
+المستودع: eg250k-del/openclude
+
+## الهدف النهائي
+ماكينة AI Animation بأقل تدخل:
+
+Film Idea / Long Text
+  → Script → Characters → Character References
+  → Scenes → Voice/Audio
+  → Full Motion Animation
+  → Scene Continuity
+  → Automatic Assembly
+  → Long Film (20min → 2h+)
+
+مهم: full motion video — مش صور ولا slideshow
+المرحلة التالية: multiple GPUs (بعد النسخة المستقرة فقط)
+
+## خبرة المستخدم
+- مبتدئ تمامًا في البرمجة
+- خطوة واحدة في كل مرة + كود جاهز للنسخ
+- الهدف = النتيجة مش تعلم البرمجة
+
+## ما حدث سابقًا
+- SaladCloud + RTX 4090 24GB + ComfyUI + Wan 2.2
+- مشاكل في الـ Container
+- فقدان موديلات Wan بعد إعادة التخصيص
+- يوجد Container قديم — لا تحذفه
+
+## المصادر (بالكود الفعلي لا README)
+A) WanScript2Movie
+   https://github.com/jeffmeloy/WanScript2Movie
+B) comfyui-wan-video-pipeline
+   https://github.com/lilinsong1/comfyui-wan-video-pipeline
+C) ComfyUI-vidflows
+   https://github.com/kustomzone/ComfyUI-vidflows
+D) Wan2GP
+   https://github.com/pythongosssss/Wan2GP
+E) Wan2GP_on_Colab_AR_Beginner.ipynb (مرفق)
+
+## Pipeline المطلوب
+1. Input      — فكرة/قصة/script
+2. Script     — AI يحوّلها script منظم
+3. Characters — استخراج + character sheets
+   (front/side/back/expressions/clothing)
+4. Scenes     — تقسيم scenes ثم shots
+   (مكان/شخصيات/حركة/كاميرا/حوار/مدة/صوت)
+5. Voice      — narration + dialogue + character voices
+   مدة الصوت تحدد مدة اللقطة
+6. Video Gen  — Wan 2.2 full motion
+7. Continuity — identity + environment + clothing
+   + style + last-frame carry
+8. Automation — queue, batch, retry, logging, resume
+9. Assembly   — ترتيب + sync + merge + ffmpeg
+
+## متطلبات قاسية
+- فشل مشهد واحد = يُعاد هو فقط، لا الفيلم كله
+- لا توليد ساعات دفعة واحدة — shots صغيرة ثم تجميع
+- افحص متطلبات VRAM لكل workflow (24GB)
+- فصل دائم: Repository | Checkpoints | Outputs | Cache
+
+## قرار مطلوب
+Wan2GP محرك أساسي؟ ComfyUI للـ pipeline؟ ولا الاتنين؟
+القرار مبني على الكود الفعلي لا الانطباع
+
+## المعمارية المستهدفة
+Story → Script → Character Extraction → Character References
+→ Scene Split → Voice → Scene Duration → Wan 2.2
+→ Continuity → Queue → Retry → FFmpeg → Final Movie
+
+## المخرجات المطلوبة
+A) ماذا وجدنا؟
+B) ما المشروع الأساس؟
+C) ما الأجزاء المأخوذة من الآخرين؟
+D) ما الذي نبنيه بأنفسنا؟
+E) شكل الـ Pipeline النهائي
+F) ما المطلوب على SaladCloud؟
+G) ما الذي يُحفظ في Persistent Storage؟
+H) أول خطوة تنفيذية واحدة؟
+
+## قاعدة العمل
+Analyze → Design → Build → Test
+
+ممنوع الآن:
+- إنشاء Container على SaladCloud
+- تنزيل موديلات
+- أي تنفيذ قبل انتهاء التحليل
+
+إلزامي:
+- خطوة واحدة في كل مرة
+- لا تبنِ من الصفر ما هو موجود
+- تقييم مبني على كود فعلي لا README
+
+## المستخدم
+GitHub: eg250k-del
+Repo: eg250k-del/openclude
