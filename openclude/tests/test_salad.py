@@ -128,12 +128,51 @@ def container_of(cfg=None) -> dict:
     return group_spec(cfg or Config.from_env())["container"]
 
 
-def test_the_spec_targets_amd64(clean_env) -> None:
-    assert container_of()["image"]["architecture"] == "amd64"
+def test_the_image_is_a_plain_string(clean_env) -> None:
+    """The create schema rejects an object here with 'The input was not valid'.
+
+    That is not a guess: it is the 400 the live API returned, and it named
+    container.image without saying what it wanted. The published
+    ContainerGroupPrototype shows `"image": "<registry>/<repo>:<tag>"`.
+    """
+    image = container_of()["image"]
+    assert isinstance(image, str)
+    assert image == os.environ["OPENCLIDE_IMAGE"]
 
 
-def test_the_spec_uses_the_image_repository(clean_env) -> None:
-    assert container_of()["image"]["repository"] == os.environ["OPENCLIDE_IMAGE"]
+def test_the_gpu_class_is_a_uuid_not_a_name(clean_env) -> None:
+    """The same 400, for gpu_classes. Names are not accepted at all."""
+    import re
+
+    ids = container_of()["resources"]["gpu_classes"]
+    assert ids, "no GPU class requested"
+    for value in ids:
+        assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                            r"[0-9a-f]{4}-[0-9a-f]{12}", value), value
+
+
+def test_memory_is_in_megabytes(clean_env) -> None:
+    """It was 32, which the API would have read as 32 MB of RAM.
+
+    Nothing rejects a plausible number in the wrong unit, so a dry run cannot
+    catch this and only a container that dies on boot will.
+    """
+    memory = container_of()["resources"]["memory"]
+    assert memory >= 8192, f"{memory} MB is not a machine that can load a model"
+
+
+def test_storage_is_in_bytes(clean_env) -> None:
+    """It was 120000, which the API would have read as 117 KB of disk."""
+    storage = container_of()["resources"]["storage_amount"]
+    assert storage >= 10 * 1024**3, f"{storage} bytes cannot hold weights"
+
+
+def test_probe_headers_are_a_list_not_a_dict(clean_env) -> None:
+    """ContainerGroupProbeHttp requires an array."""
+    for name in ("liveness_probe", "readiness_probe", "startup_probe"):
+        probe = group_spec(Config.from_env()).get(name)
+        if probe and "http" in probe:
+            assert isinstance(probe["http"]["headers"], list), name
 
 
 def test_the_spec_asks_for_profile_3_for_24gb(clean_env) -> None:
@@ -156,11 +195,26 @@ def test_the_spec_does_not_autostart(clean_env) -> None:
     assert group_spec(Config.from_env())["autostart_policy"] is False
 
 
-def test_the_spec_declares_a_queue_autoscaler(clean_env) -> None:
-    autoscaler = group_spec(Config.from_env())["queue_autoscaler"]
-    assert autoscaler["min_replicas"] == 0
-    assert autoscaler["max_replicas"] >= 1
-    assert autoscaler["desired_queue_length"] >= 1
+def test_the_spec_declares_no_salad_job_queue(clean_env) -> None:
+    """This project has no SaladCloud job queue. Its queue is a store folder.
+
+    The autoscaler and connection blocks referenced a queue that was never
+    created, and the API validates that reference, so every create attempt was
+    rejected. Nothing in the spec may name a queue.
+    """
+    spec = group_spec(Config.from_env())
+    assert "queue_autoscaler" not in spec
+    assert "queue_connection" not in spec
+    assert "queue_name" not in json.dumps(spec)
+
+
+def test_one_replica_is_enough_to_prove_the_pipeline(clean_env) -> None:
+    """Replicas are static now, so the count is a cost decision.
+
+    One GPU renders shots one at a time, because one shot is one generation.
+    Three would render the same film three times over, or idle and bill.
+    """
+    assert group_spec(Config.from_env())["replicas"] == 1
 
 
 def test_the_spec_satisfies_every_required_field(clean_env) -> None:
@@ -206,7 +260,8 @@ def test_the_spec_requires_object_storage(clean_env) -> None:
 
 
 def test_the_spec_restarts_on_failure(clean_env) -> None:
-    assert group_spec(Config.from_env())["restart_policy"]["condition"] == "always"
+    """A plain string, because the object form is what the create schema rejects."""
+    assert group_spec(Config.from_env())["restart_policy"] == "always"
 
 
 def test_the_spec_exposes_one_http_port_without_auth(clean_env) -> None:
