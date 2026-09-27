@@ -14,9 +14,12 @@ cannot slip past it.
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
+import openclude.salad as salad_module
 from openclude.salad import (
     SECRET_MARKERS,
     is_secret_name,
@@ -106,16 +109,35 @@ def test_no_secret_survives_a_mixed_environment() -> None:
 # --------------------------------------------------------------------------
 
 
+#: Everything Config.from_env insists on.
+REQUIRED_ENV = ("OPENCLIDE_IMAGE", "SALAD_ORGANIZATION", "SALAD_PROJECT",
+                "SALAD_API_KEY")
+
+
+def test_the_fixture_covers_everything_the_config_requires() -> None:
+    """A new required variable must break this test, not the build.
+
+    The first version of this fixture set three of the four, so the test passed
+    on the developer machine, where the real Salad key is already in the
+    environment, and errored on the CI runner, where it is not. A test that
+    only passes where you happen to be is not a test.
+    """
+    source = Path(salad_module.__file__).read_text("utf-8")
+    named = set(re.findall(r'"(SALAD_[A-Z_]+|OPENCLIDE_IMAGE)"', source))
+    assert named <= set(REQUIRED_ENV), (
+        f"salad.py references {sorted(named - set(REQUIRED_ENV))}, which this "
+        f"test does not know to provide. Add it to REQUIRED_ENV."
+    )
+
+
 @pytest.fixture
 def deployable(monkeypatch):
-    """The four variables Config.from_env insists on, with harmless values."""
-    for name, value in (
-        ("OPENCLIDE_IMAGE", "ghcr.io/eg250k-del/openclude:0" * 0 + "test"),
-        ("SALAD_ORGANIZATION", "mostafa-ai"),
-        ("SALAD_PROJECT", "aoutooanimation"),
-    ):
-        monkeypatch.setenv(name, value)
-    return Config.from_env()
+    """A config that can actually be built, with harmless values."""
+    for name in REQUIRED_ENV:
+        monkeypatch.setenv(name, f"test-{name.lower()}")
+    cfg = Config.from_env()          # raises if anything is still missing
+    assert cfg.organization and cfg.project and cfg.image
+    return cfg
 
 
 def test_the_actual_group_spec_leaks_nothing(monkeypatch, deployable) -> None:

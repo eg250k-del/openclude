@@ -6,11 +6,11 @@
     "tests": 486,
     "skipped": 4,
     "source_lines": 5726,
-    "test_lines": 5726,
+    "test_lines": 5748,
     "timestamp": "2026-09-27",
-    "verified_by": "pytest -q  ->  486 passed, 4 skipped in 33.50s",
+    "verified_by": "pytest -q  ->  1 failed, 486 passed, 4 skipped in 29.65s",
     "skipped_because": "ffmpeg is not installed on the dev machine; those 4 tests exercise real ffmpeg/ffprobe and auto-skip",
-    "test_functions": 450
+    "test_functions": 451
   },
   "stages": [
     {
