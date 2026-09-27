@@ -56,23 +56,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the archive's SHA-256 before unpacking it, exactly like the engine's own
 # bootstrap does.
 ARG FFMPEG_RELEASE_API=https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest
+COPY deploy/pick_ffmpeg.py /usr/local/bin/pick_ffmpeg.py
 RUN set -eux; \
-    mkdir -p /opt/ffmpeg; \
-    url=$(python3 - "$FFMPEG_RELEASE_API" <<'PY'
-import json, re, sys, urllib.request
-spec = json.load(urllib.request.urlopen(sys.argv[1]))
-assets = spec.get("assets", [])
-pat = re.compile(r"^ffmpeg-n(?P<v>\d+\.\d+)-latest-linux64-gpl-(?P=v)\.tar\.xz$")
-best = None
-for a in assets:
-    m = pat.match(a.get("name", ""))
-    if m and (best is None or tuple(map(int, m.group("v").split("."))) > best[0]):
-        best = (tuple(map(int, m.group("v").split("."))), a)
-if best is None:
-    raise SystemExit("no matching static ffmpeg asset")
-print(best[1]["browser_download_url"])
-PY
-); \
+    url=$(python3 /usr/local/bin/pick_ffmpeg.py "$FFMPEG_RELEASE_API"); \
     echo "downloading $url"; \
     curl -fsSL -o /tmp/ffmpeg.tar.xz "$url"; \
     mkdir -p /tmp/ffx && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffx; \
@@ -82,7 +68,10 @@ PY
     install -m 0755 "$(find /tmp/ffx -type f -name ffprobe | head -1)" /usr/local/bin/ffprobe; \
     rm -rf /tmp/ffx /tmp/ffmpeg.tar.xz; \
     ffmpeg -version | head -1; \
-    ffmpeg -h full 2>/dev/null | grep -q -- -fps_mode || { echo "ffmpeg lacks -fps_mode"; exit 1; }
+    # the engine needs -fps_mode, which ffmpeg 4.x (Ubuntu 22.04) does not have;
+    # fail the build here rather than at container start, minutes and money later
+    ffmpeg -h full 2>/dev/null | grep -q -- -fps_mode || { echo "ffmpeg lacks -fps_mode"; exit 1; }; \
+    rm -f /usr/local/bin/pick_ffmpeg.py
 
 # ---------------------------------------------------------------------- torch
 RUN python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel \

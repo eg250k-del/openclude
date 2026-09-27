@@ -3,14 +3,14 @@
   "updated": "2026-09-27",
   "headline": "Orchestration engine complete and verified. No GPU, no network, no ffmpeg yet.",
   "verified": {
-    "tests": 262,
+    "tests": 284,
     "skipped": 4,
     "source_lines": 4080,
-    "test_lines": 3217,
+    "test_lines": 3437,
     "timestamp": "2026-09-27",
-    "verified_by": "pytest -q  ->  1 failed, 262 passed, 4 skipped in 4.51s",
+    "verified_by": "pytest -q  ->  284 passed, 4 skipped in 4.47s",
     "skipped_because": "ffmpeg is not installed on the dev machine; those 4 tests exercise real ffmpeg/ffprobe and auto-skip",
-    "test_functions": 252
+    "test_functions": 273
   },
   "stages": [
     {
