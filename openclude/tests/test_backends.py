@@ -222,9 +222,30 @@ def test_at_least_one_upload_name_resolves() -> None:
 
 
 def test_the_helper_finds_the_modern_name() -> None:
+    """Against the real library, so it skips where the library is absent.
+
+    huggingface_hub is a dependency of the engine, not of openclude, so it is
+    present in the image and on a developer machine but not on a bare CI
+    runner. The first version of this test imported it unconditionally and
+    failed the whole build for exactly that reason.
+    """
     from openclude.storage import _hf_callable
 
+    pytest.importorskip("huggingface_hub")
     assert callable(_hf_callable("upload_file", "hf_hub_upload"))
+
+
+def test_the_helper_reports_a_missing_library_clearly(monkeypatch) -> None:
+    """On a runner without it, the message has to name the package."""
+    import sys
+
+    from openclude.storage import _hf_callable
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+    with pytest.raises(StorageError) as exc:
+        _hf_callable("upload_file", "hf_hub_upload")
+    assert "huggingface_hub" in str(exc.value)
+    assert "engine" in str(exc.value), "the message should say where it comes from"
 
 
 def _with_module(monkeypatch, name: str, obj: dict) -> None:
