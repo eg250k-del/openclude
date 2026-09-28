@@ -4,8 +4,10 @@ Copy everything between the lines below and paste it as your first message.
 
 ---
 
-Read `G:\opencode\openclude\START-HERE.md` and follow it. The project is
-built and committed; do not start from scratch. Run:
+Read `G:\opencode\openclude\START-HERE.md` and follow it, then
+`G:\opencode\openclude\PLAN.md`. The project changed direction: build ComfyUI
+on a rented GPU, in the user's browser, with storage that survives. Do not
+extend the story-to-film pipeline. Run:
 
 ```
 cd G:\opencode\openclude
@@ -22,11 +24,24 @@ short, and give at most one instruction at a time.
 
 ---
 
-## What this is
+## Read `PLAN.md` first
+
+The project changed direction. Read `openclude/PLAN.md` before anything else.
+
+**In short:** the user wants ComfyUI on a rented GPU, in their browser, with
+the models and outputs stored somewhere that survives the container being
+stopped. A previous session built a story-to-film pipeline instead. It is
+being abandoned, not extended. The storage layer, the SaladCloud client and
+the secrets handling from it are all reused.
+
+**The one test that matters:** a video exists in the repo, and the user watched
+it in their browser. Not the test count. Not the code. That.
+
+## What the old plan was
 
 An AI animation production machine: `story -> script -> voice -> shots -> film`,
 built to run unattended on rented GPUs where the container is assumed to die
-without warning.
+without warning. It works up to the render and has never produced a frame.
 
 ## Where it actually is
 

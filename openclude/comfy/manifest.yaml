@@ -1,0 +1,53 @@
+# Which models ComfyUI downloads when the container starts.
+#
+# This is the file the user was describing: when the container comes up, it is
+# told what to fetch. Every URL is on Hugging Face and free, so the download
+# happens on the rented node and never touches the user's own internet.
+#
+# EVERY URL HERE WAS CHECKED WITH A HEAD REQUEST BEFORE IT WAS WRITTEN DOWN.
+# The first version of this file used paths from the SaladCloud documentation
+# that return 404, and the model repository they named,
+# Comfy-Org/Wan_2.2_TI2V-5B_ComfyUI_repackaged, does not exist at all. Guessing
+# a path is cheap and fails at 4am on a rented GPU, so `check_manifest_urls`
+# in the test suite now HEADs every URL and fails the build on a 404.
+#
+# Nothing is stored in this project's Hugging Face repo, and that is
+# deliberate. These are tens of gigabytes and a free tier holds ten.
+# Re-downloading from Hugging Face is free and takes minutes on a cloud node.
+# What does go in the repo is the user's own work: every generated image and
+# video.
+#
+# Sized for 24 GB of VRAM, which is what this account runs.
+
+custom_nodes:
+  # Video helper suite: the ffmpeg wrapper that actually writes a playable video
+  # file, plus the batch loader. Without these a video workflow produces a
+  # folder of frames and no movie, which is a confusing failure.
+  - comfyui-videohelpersuite
+  - comfyui-impact-pack
+
+models:
+  before_start:
+    # ---------------------------------------------------------------- images
+    # FLUX.1 Schnell in fp8, 16.1 GB. The fastest model here that still makes
+    # good images. This is what proves the interface works: 1024x1024 in
+    # seconds, and it needs no custom node.
+    - url: https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors
+      local_path: /opt/ComfyUI/models/checkpoints/flux1-schnell-fp8.safetensors
+
+    # ---------------------------------------------------------------- video
+    # Wan 2.2 TI2V-5B. Chosen as a GGUF quantisation because the fp16 weights
+    # are about 10 GB and the text encoder is another 11, which does not leave
+    # room on a 24 GB card. Q4_K_M is about 3 GB and is the usual quality
+    # point for this family.
+    - url: https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF/resolve/main/Wan2.2-TI2V-5B-Q4_K_M.gguf
+      local_path: /opt/ComfyUI/models/diffusion_models/Wan2.2-TI2V-5B-Q4_K_M.gguf
+
+    - url: https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF/resolve/main/VAE/Wan2.2_VAE.safetensors
+      local_path: /opt/ComfyUI/models/vae/Wan2.2_VAE.safetensors
+
+    # umt5 is the text encoder Wan 2.2 requires. There is no smaller option, so
+    # this is the single biggest reason video generation on a free node is slow
+    # to start: about 11 GB before the first frame.
+    - url: https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B/resolve/main/models_t5_umt5-xxl-enc-bf16.pth
+      local_path: /opt/ComfyUI/models/text_encoders/umt5_xxl_bf16.pth
