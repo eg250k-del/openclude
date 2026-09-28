@@ -49,6 +49,25 @@ MAX_RETRIES = 4
 TIMEOUT = 180
 
 
+def chat_url(base: str) -> str:
+    """The chat-completions URL for a given base.
+
+    Whether the base carries the version segment is the operator's choice, and
+    providers disagree: Salad's AI Gateway publishes `https://ai.salad.cloud/v1`
+    while the older SaladCloud route is `https://api.salad.com/api/public`. The
+    first version of this file appended `/v1` unconditionally, so the documented
+    Salad value produced `/v1/v1/chat/completions` and a 404 whose body says
+    nothing about the real cause.
+
+    So: append the segment only when it is not already there, and when the base
+    already ends in it, keep the base exactly as given.
+    """
+    base = base.rstrip("/")
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
 # --------------------------------------------------------------------------
 # transport
 # --------------------------------------------------------------------------
@@ -108,7 +127,7 @@ def chat(
     ).hexdigest()[:16]
 
     data = json.dumps(body).encode("utf-8")
-    url = f"{cfg.base_url}/v1/chat/completions"
+    url = chat_url(cfg.base_url)
 
     last = ""
     for attempt in range(1, MAX_RETRIES + 1):
@@ -337,6 +356,16 @@ class ChatScriptWriter:
     usage: Usage = field(default_factory=Usage)
     characters: Sequence[Character] = ()
 
+    #: The narration language. It was hardcoded to "ar" on a class that has
+    #: nothing to do with Arabic, so an English story came back tagged Arabic and
+    #: would have been sent to an Arabic voice. The job carries the language, and
+    #: OPENCLIDE_LANGUAGE is the default for it.
+    language: str = field(
+        default_factory=lambda: (os.environ.get("OPENCLIDE_LANGUAGE", "en").strip()
+                                 or "en")
+    )
+    minutes: int = 1
+
     def write(self, story: str, characters: Sequence[Character]) -> str:
         if not self.cfg.configured:
             raise ScriptError(
@@ -385,13 +414,18 @@ class ChatScriptWriter:
         }
         return json.dumps(draft)
 
-    language: str = "ar"
+    language: str = "en"
     minutes: int = 1
 
 
 def writer_from_env() -> ScriptWriter:
     """The writer the worker uses. Fails loudly when nothing is configured."""
     w = ChatScriptWriter()
-    w.language = os.environ.get("FILM_LANGUAGE", "ar")
+    # English by default, and FILM_LANGUAGE is the override. This was "ar" in
+    # two places on a codebase that has no Arabic content, so an English story
+    # was tagged Arabic and would have been sent to an Arabic voice. The job's
+    # `language` field is the real authority; this is only the fallback for a
+    # writer constructed outside a job.
+    w.language = os.environ.get("FILM_LANGUAGE", "en").strip() or "en"
     w.minutes = int(os.environ.get("FILM_TARGET_MINUTES", "1"))
     return w

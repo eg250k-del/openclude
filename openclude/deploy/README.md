@@ -67,18 +67,68 @@ SaladCloud's own docs:
 > *Volume mounting using S3FS, FUSE, or NFS is not supported, as SaladCloud
 > containers do not operate in privileged mode.*
 
-So Cloudflare R2, which Salad recommend because it has no egress fees:
+So we need a real object store. Three backends are supported; pick one.
+
+### Option A — Hugging Face (free, no credit card) ← the one we are using
 
 ```powershell
+$env:OPENCLIDE_STORE = "hf"
+$env:HF_REPO        = "your-username/openclude"
+$env:HF_TOKEN       = "hf_..."
+```
+
+How to get those, click by click:
+
+1. `huggingface.co` → **Join** (free, no card asked for)
+2. Left menu → **Datasets** → **New dataset**. Name it anything, e.g. `openclude`.
+   Set it to **Private**. It is a *dataset* repo, not a model repo — this is a
+   file store, not a model.
+3. Open that dataset → **Settings** (or the gear icon) → **Access Tokens** →
+   **Create User Access Token** → permission **Write** → **Create token**.
+4. Copy the token once; it is shown only once.
+5. Your repo id is the two names in the dataset's URL, e.g.
+   `huggingface.co/datasets/your-username/openclude` gives `your-username/openclude`.
+
+Why this one: `huggingface_hub` is already installed in the image, because the
+engine uses it to fetch model weights. So this backend adds no dependency and no
+new failure surface. R2, Backblaze B2 and Google Cloud Storage all stop at a
+payment form.
+
+### Option B — any S3-compatible store
+
+```powershell
+$env:OPENCLIDE_STORE       = "s3"
 $env:S3_ENDPOINT            = "https://<account>.r2.cloudflarestorage.com"
 $env:S3_BUCKET              = "openclude"
 $env:S3_ACCESS_KEY_ID       = "..."
 $env:S3_SECRET_ACCESS_KEY   = "..."
 ```
 
-The container **refuses to start** without these (`OPENCLIDE_REQUIRE_STORE=1`),
-because rendering a film into a disk that vanishes is worse than not starting.
-That is the check that would have saved the models lost earlier.
+Cloudflare R2, Backblaze B2, MinIO, or anything else that speaks S3. 10 GB is
+enough: a 2-hour film is under 1 GB once the redundant clips are pruned, and
+`prune()` is what makes that true.
+
+### Option C — a local folder
+
+```powershell
+$env:OPENCLIDE_STORE = "local"
+```
+
+Works for development and for the offline demo. **Not durable.** A SaladCloud
+container's disk is deleted the moment it stops.
+
+### Check it before deploying
+
+```powershell
+& $py -m openclude.cli store
+```
+
+Prints a usage report, or exactly which variable is missing.
+
+The container **refuses to start** without a durable store
+(`OPENCLIDE_REQUIRE_STORE=1`), because rendering a film into a disk that
+vanishes is worse than not starting. That is the check that would have saved
+the models lost earlier.
 
 ---
 

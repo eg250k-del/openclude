@@ -140,12 +140,98 @@ def test_a_bad_anchor_is_dropped_not_crashed_on() -> None:
 # --------------------------------------------------------------------------
 
 
+def test_no_source_file_defaults_to_arabic() -> None:
+    """Three dataclass fields said "ar" on a project with no Arabic content.
+
+    ChatScriptWriter, writer_from_env, pipeline.Config and worker.Job all
+    defaulted to Arabic. The first real LLM call returned an English script
+    tagged Arabic, and the film would have been spoken by an Arabic voice. A
+    test per site would have been found and fixed one at a time; this finds all
+    of them, and any added later.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "openclude"
+    offenders = []
+    for path in sorted(src.glob("*.py")):
+        for n, line in enumerate(path.read_text("utf-8").splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if '"ar"' in code or "'ar'" in code:
+                offenders.append(f"{path.name}:{n}: {line.strip()[:70]}")
+    assert not offenders, "Arabic defaults found:\n" + "\n".join(offenders)
+
+
+def test_the_job_language_reaches_the_film() -> None:
+    """End to end through the worker's own types, not just the parser."""
+    from openclude.worker import Job
+    from openclude.pipeline import Config as PipelineConfig
+
+    job = Job(id="f01", story="x", film_id="f01", target_minutes=1)
+    assert job.language == "en", "an omitted field must not become Arabic"
+    assert PipelineConfig().language == "en"
+
+    job_fr = Job(id="f02", story="x", film_id="f02", target_minutes=1,
+                 language="fr")
+    assert PipelineConfig(language=job_fr.language).language == "fr"
+
+
+def test_the_chat_url_never_doubles_the_version_segment() -> None:
+    """The documented Salad base already ends in /v1, and appending it again
+    produced /v1/v1/chat/completions and a 404 whose body says nothing useful.
+    """
+    from openclude.llm_client import chat_url
+
+    assert chat_url("https://ai.salad.cloud/v1") == \
+        "https://ai.salad.cloud/v1/chat/completions"
+    assert chat_url("https://ai.salad.cloud/v1/") == \
+        "https://ai.salad.cloud/v1/chat/completions"
+    assert chat_url("https://api.salad.com/api/public") == \
+        "https://api.salad.com/api/public/v1/chat/completions"
+    assert chat_url("https://api.openai.com") == \
+        "https://api.openai.com/v1/chat/completions"
+    assert "v1/v1" not in chat_url("https://ai.salad.cloud/v1")
+
+
 def test_a_draft_becomes_a_valid_film() -> None:
     film = to_film(parse_draft(payload()), CAST)
-    assert film.language == "ar"
+    assert film.language == "en"
     assert len(film.scenes) == 1
     assert [s.id for s in film.shots] == ["s01_sh001", "s01_sh002"]
     assert film.total_seconds() > 0
+
+
+def test_the_job_language_wins_over_whatever_the_model_said() -> None:
+    """The model returned "ar" for an English story and the film inherited it.
+
+    The prompt offered `"ar" or "en"` with nothing to choose between, and a
+    dataclass field was hardcoded to "ar". Both would have sent English
+    narration to an Arabic voice. The caller is the authority, because the
+    caller is what knows the language of the request.
+    """
+    data = payload(language="ar")
+    assert parse_draft(data, language="en").language == "en"
+    assert parse_draft(data, language="fr").language == "fr"
+    # and with nothing said, the model is still not trusted
+    assert parse_draft(data).language == "en"
+
+
+def test_the_default_language_is_english_not_arabic() -> None:
+    """A hardcoded "ar" on a class with nothing to do with Arabic."""
+    import os
+    from unittest.mock import patch
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("OPENCLIDE_LANGUAGE", None)
+        from openclude.llm_client import ChatScriptWriter
+        assert ChatScriptWriter().language == "en"
+
+
+def test_the_prompt_does_not_offer_a_choice_it_cannot_justify() -> None:
+    """`"ar" or "en"` with no instruction is a coin toss the model loses."""
+    from openclude.llm import SCHEMA_HINT
+
+    assert '"ar" or "en"' not in SCHEMA_HINT
+    assert '"language": "en"' in SCHEMA_HINT
 
 
 def test_durations_are_estimates_until_the_audio_is_measured() -> None:

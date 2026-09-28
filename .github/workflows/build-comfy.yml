@@ -1,0 +1,91 @@
+name: build-comfy
+
+# Build the ComfyUI image.
+#
+# Separate from build-image, which builds the story-to-film pipeline. Three
+# reasons it should not be the same workflow:
+#
+#   1. They have different base images. This one is FROM the official Salad
+#      ComfyUI image, which is already 6-16 GB, so it is slow. That slowness
+#      should not delay the other image.
+#   2. They are independent. If the ComfyUI build fails, the pipeline image is
+#      still usable, and a combined workflow would report one red X for two
+#      unrelated things.
+#   3. They change for different reasons. A manifest edit should not rebuild
+#      10 GB of pipeline code.
+#
+# The manifest is verified before the build, not after. A wrong model URL costs
+# an hour on a rented GPU and produces nothing; it costs nothing here.
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    paths:
+      - "openclude/comfy/**"
+      - "tests/test_comfy_manifest.py"
+      - ".github/workflows/build-comfy.yml"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}-comfy
+  TAG: ${{ github.sha }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check every model URL in the manifest resolves
+        # The first manifest pointed at a model repository that does not exist.
+        # Nothing would have caught it until a rented GPU spent an hour
+        # downloading and then failed. This step costs seconds.
+        working-directory: openclude
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pyyaml
+          python -m pytest tests/test_comfy_manifest.py -q
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: openclude/comfy
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          # No build cache on purpose. The base image is 6-16 GB of third-party
+          # content, so type=gha tries to re-upload the whole thing and fills
+          # the 10 GB repository cache limit, which fails the build at 99
+          # percent. The layer is a single FROM plus CMD, so there is nothing
+          # worth caching anyway.
+          cache-from: ""
+          cache-to: ""

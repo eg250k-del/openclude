@@ -3,14 +3,14 @@
   "updated": "2026-09-28",
   "headline": "Image built and pushed. All four pipeline stages have real implementations. Nothing deployed to SaladCloud yet.",
   "verified": {
-    "tests": 327,
+    "tests": 616,
     "skipped": 4,
-    "source_lines": 4764,
-    "test_lines": 3961,
+    "source_lines": 6471,
+    "test_lines": 7522,
     "timestamp": "2026-09-27",
-    "verified_by": "pytest -q  ->  327 passed, 4 skipped in 25.73s",
+    "verified_by": "pytest -q  ->  3 failed, 616 passed, 4 skipped in 80.78s (0:01:20)",
     "skipped_because": "ffmpeg is not installed on the dev machine; those 4 tests exercise real ffmpeg/ffprobe and auto-skip",
-    "test_functions": 316
+    "test_functions": 577
   },
   "stages": [
     {

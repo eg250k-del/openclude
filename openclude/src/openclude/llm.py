@@ -82,7 +82,7 @@ class Draft:
         return tuple(s for sc in self.scenes for s in sc.shots)
 
 
-def parse_draft(payload: str | dict[str, Any]) -> Draft:
+def parse_draft(payload: str | dict[str, Any], language: str = "") -> Draft:
     """Turn a model response into a Draft, or explain precisely why not.
 
     A model that returns a paragraph instead of JSON is the single most common
@@ -163,7 +163,12 @@ def parse_draft(payload: str | dict[str, Any]) -> Draft:
 
     return Draft(
         title=str(data.get("title", "untitled")).strip() or "untitled",
-        language=str(data.get("language", "en")).strip() or "en",
+        # The job says what language the film is in, and the job is the request.
+        # Letting the model decide produced "ar" for an English story on the
+        # first real call, which would have sent English narration to an Arabic
+        # voice. A model guessing at an input it was already given is not a
+        # decision to defer to; the caller is the authority.
+        language=(language or "en").strip() or "en",
         scenes=tuple(scenes),
     )
 
@@ -272,7 +277,7 @@ SYSTEM = (
 SCHEMA_HINT = """Return exactly this shape:
 {
   "title": "string",
-  "language": "ar" or "en",
+  "language": "en",
   "scenes": [
     {
       "summary": "one line",

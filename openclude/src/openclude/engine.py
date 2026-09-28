@@ -19,6 +19,7 @@ upgrade path to a single file.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,7 +81,85 @@ class WanGPAdapter:
     _session: Any = field(default=None, init=False, repr=False)
     _import_error: str = field(default="", init=False, repr=False)
 
+    @property
+    def session(self) -> Any:
+        """The live engine session, or None.
+
+        Exposed so the speech backend can share it. The engine keeps a
+        process-wide runtime singleton and raises if you init a second session
+        with different arguments, so starting one per consumer does not work.
+        """
+        return self._session
+
+    @property
+    def started(self) -> bool:
+        return self._session is not None
+
     # -- lifecycle ---------------------------------------------------------
+
+    def prefetch(self, model_type: str) -> list[str]:
+        """Download this model's weights before anything else needs them.
+
+        Called from the worker rather than from the container entrypoint, and
+        the reason is specific: the entrypoint ran the download before the
+        process that serves /health existed, so for the three minutes the
+        download took, nothing answered port 8000. The liveness probe counted
+        that as failure and killed the container, and `restart_policy: always`
+        turned it into a loop. The group showed `running` and then `creating`,
+        forever, writing nothing.
+
+        So the download has to happen with the health server already up, and it
+        reports progress through the readiness endpoint rather than through the
+        absence of a process.
+
+        The engine is imported as `shared.api`, which is the module the
+        renderer actually uses. The entrypoint's heredoc imported `wgp`, a
+        module that is not what anything calls, so its download step could not
+        have worked even if it had reached it.
+        """
+        import sys
+
+        root = str(self.paths.root)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+
+        try:
+            from shared.utils.download import download_file  # type: ignore[import-not-found]
+            from shared.utils.files_locator import (  # type: ignore[import-not-found]
+                get_smart_download_location,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise EngineUnavailable(
+                f"cannot import the engine's downloader: {exc}"
+            ) from exc
+
+        definition_file = Path(self.paths.root) / "defaults" / f"{model_type}.json"
+        if not definition_file.exists():
+            raise EngineUnavailable(
+                f"no definition for {model_type!r} at {definition_file}"
+            )
+        definition = json.loads(definition_file.read_text("utf-8"))
+
+        urls = definition.get("URLs", [])
+        quantised = [u for u in urls if "quanto" in u or "int8" in u]
+        need = quantised[:1] or urls[:1]
+        need += definition.get("VAE_URLs", [])[:1]
+        need += definition.get("text_encoder_URLs", [])[:1]
+        for key in ("URLs2", "loras", "preload_URLs"):
+            extra = definition.get(key, [])
+            if isinstance(extra, list) and extra and isinstance(extra[0], str):
+                need += extra[:1]
+
+        fetched: list[str] = []
+        for url in need:
+            name = url.rsplit("/", 1)[-1]
+            target = get_smart_download_location(name)
+            if Path(target).exists() and Path(target).stat().st_size > 0:
+                fetched.append(name)
+                continue
+            download_file(url, target)
+            fetched.append(name)
+        return fetched
 
     def start(self) -> "WanGPAdapter":
         """Load the engine. Idempotent."""

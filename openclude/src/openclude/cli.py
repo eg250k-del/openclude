@@ -33,6 +33,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("No HANDOFF.json found. Run the test suite to confirm the build.")
         return 1
 
+    print()
+    print("  A NEW SESSION: read openclude/START-HERE.md first. It has a")
+    print("  copy-pasteable resume prompt and the locked decisions.")
+
     print("=" * 72)
     print(f"  openclude {h.get('version', __version__)}")
     print(f"  {h.get('headline', '')}")
@@ -104,6 +108,98 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_store(args: argparse.Namespace) -> int:
+    """Report the object store, and how much room is left."""
+    import os
+
+    from .storage_doctor import (
+        FREE_TIER_GB,
+        build_store,
+        describe,
+        how_to_configure,
+        measure,
+        required_env,
+        selected_backend,
+    )
+
+    print("STORAGE DOCTOR\n")
+    try:
+        backend = selected_backend()
+    except RuntimeError as exc:
+        print(f"  {exc}")
+        return 1
+    print(f"  {'backend':<20} {backend}")
+
+    for key in ("OPENCLIDE_STORE", "HF_REPO", "HF_TOKEN", "S3_ENDPOINT",
+                "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"):
+        print(f"  {key:<20} {'set' if os.environ.get(key) else '-'}")
+
+    missing = [k for k in required_env(backend) if not os.environ.get(k)]
+    if missing:
+        print()
+        print("  Not configured. Nothing else can run: SaladCloud deletes a")
+        print("  container's disk when it stops, so the ledger and the clips")
+        print("  would vanish with it.")
+        print()
+        for line in how_to_configure(backend):
+            print(f"  {line}")
+        return 1
+
+    try:
+        store = build_store(backend)
+    except Exception as exc:  # noqa: BLE001
+        print()
+        print(f"  UNREACHABLE: {type(exc).__name__}: {exc}")
+        return 1
+
+    print()
+    print(f"  {'target':<20} {getattr(store, 'repo_id', None) or getattr(store, 'bucket', None) or store.root}")
+    print(f"  {'free tier':<20} {FREE_TIER_GB:.0f} GB")
+
+    # A store that lists nothing is ambiguous: it could be empty, or the
+    # credential could be dead. A dead credential once reported as a healthy
+    # empty repository here, which is worse than useless.
+    if hasattr(store, "identify"):
+        ident = store.identify()
+        if not ident.get("ok"):
+            print()
+            print(f"  CREDENTIAL REJECTED: {ident.get('error')}")
+            print("  The repository is fine; the token is not. Create a new one")
+            print("  at huggingface.co -> Settings -> Access Tokens -> Write.")
+            return 1
+        print(f"  {'signed in as':<20} {ident.get('user')}")
+        print(f"  {'token':<20} {ident.get('token')}")
+        writable = store.can_write()
+        print(f"  {'can write':<20} {'yes, verified' if writable else 'NO'}")
+        if not writable:
+            print()
+            print("  The token can read but not write. A film would vanish on the")
+            print("  first upload. Give the token Write permission.")
+            return 1
+
+    try:
+        usage = measure(store)
+    except Exception as exc:  # noqa: BLE001
+        print()
+        print(f"  UNREACHABLE: {type(exc).__name__}: {exc}")
+        return 1
+
+    print()
+    print(describe(usage, seconds_of_film=120.0, shots=400))
+
+    if backend == "local":
+        # Not an error: the local backend is right for development and for the
+        # offline demo. But it has to say plainly that it is not durable,
+        # because the only way to find out otherwise is to lose a film.
+        print()
+        print("  NOT DURABLE. This is a folder on one machine.")
+        print("  SaladCloud deletes a container's disk the moment it stops, so")
+        print("  on Salad this backend loses the ledger and every clip.")
+        for line in how_to_configure("local"):
+            print(f"  {line}")
+    return 0
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     from .demo import main as demo_main
 
@@ -118,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="where the project stands").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="check this machine").set_defaults(fn=cmd_doctor)
+    sub.add_parser("store", help="check the object store").set_defaults(fn=cmd_store)
 
     args = p.parse_args(argv)
     if not getattr(args, "fn", None):

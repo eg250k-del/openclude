@@ -142,27 +142,58 @@ def test_an_empty_queue_is_not_an_error(tmp_path, monkeypatch) -> None:
 def test_a_job_defaults_its_character_list() -> None:
     job = worker.Job(id="j", story="s", film_id="f", target_minutes=1)
     assert job.characters == []
-    assert job.language == "ar"
+
+
+def test_a_job_defaults_to_english() -> None:
+    """It was "ar", which would have spoken an English story with an Arabic voice."""
+    assert worker.Job(id="j", story="s", film_id="f",
+                      target_minutes=1).language == "en"
 
 
 # --------------------------------------------------------------------------
-# the unconfigured clients fail loudly instead of silently
+# the dependency wiring
+#
+# These used to assert that the stubs complained. Now the worker builds the
+# real clients, so the assertions are about the wiring: which client is
+# chosen, and what it says when nothing is configured.
 # --------------------------------------------------------------------------
 
 
-def test_the_missing_writer_says_what_to_do(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(worker, "DATA", tmp_path / "data")
+def test_the_writer_is_configured_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.setenv("LLM_BASE_URL", "http://example.invalid")
+    monkeypatch.setenv("FILM_LANGUAGE", "en")
+    monkeypatch.setenv("FILM_TARGET_MINUTES", "7")
+    w = worker.deps_writer()
+    assert w.cfg.api_key == "k"
+    assert w.language == "en"
+    assert w.minutes == 7
+
+
+def test_the_unconfigured_writer_says_what_to_set(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
     from openclude.llm import ScriptError
 
-    with pytest.raises(ScriptError, match="ScriptWriter protocol"):
+    with pytest.raises(ScriptError, match="LLM_API_KEY"):
         worker.deps_writer().write("p", [])
 
 
-def test_the_missing_synth_says_what_to_do() -> None:
+def test_engine_speech_without_a_session_refuses_with_guidance(monkeypatch) -> None:
+    """A cold start has no session yet. That is a state, not a typo."""
     from openclude.audio import AudioError
 
-    with pytest.raises(AudioError, match="Synthesiser protocol"):
-        worker.deps_synth().speak("t", "o.wav")
+    monkeypatch.setenv("TTS_MODE", "engine")
+    with pytest.raises(AudioError, match="has not finished loading"):
+        worker.deps_synth(None).speak("t", "o.wav")
+
+
+def test_a_mistyped_tts_mode_is_not_swallowed(monkeypatch) -> None:
+    """Replacing the real message with a generic one hides the operator's typo."""
+    from openclude.audio import AudioError
+
+    monkeypatch.setenv("TTS_MODE", "telepathy")
+    with pytest.raises(AudioError, match="engine, http or none"):
+        worker.deps_synth(None)
 
 
 # --------------------------------------------------------------------------
