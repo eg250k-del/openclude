@@ -32,6 +32,22 @@ from openclude.salad import (  # noqa: E402
 
 UI_PORT = cd.UI_PORT
 
+#: Video generation needs 24 GB. Anything less cannot load Wan 2.2 alongside a
+#: text encoder, and offering the user an 8 GB card would waste their time and
+#: money to find that out at render time.
+MIN_VRAM_GB = 24
+
+#: NVIDIA only. The Salad image is a CUDA build of PyTorch, so an AMD card is
+#: 24 GB of memory that cannot run a single node of it.
+#:
+#: This was found by letting the search pick whatever was free: it came back
+#: with an RX 7900 XTX, which has plenty of room and would have burned the
+#: budget on a container that cannot import torch.cuda. A GPU class is only
+#: usable if the image was built for it, and a memory number says nothing
+#: about that.
+CUDA_VENDOR_MARKERS = ("RTX", "GTX", "NVIDIA", "TESLA", "QUADRO", "A100",
+                       "H100", "L4", "L40", "T4", "V100")
+
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -110,52 +126,105 @@ def re_url(blob: str) -> str:
     return m.group(0) if m else ""
 
 
+def all_gpu_classes(salad_cfg: Config) -> list[tuple[str, str, int]]:
+    """Every GPU class the account can use, as (name, uuid, vram_gb).
+
+    Read from the live API rather than from a hardcoded list. The account has 49
+    classes, and the first version of this watcher only knew about three. When
+    all three of those showed zero it waited, while 32 others had capacity and
+    one of them, an RTX 3090, had 65. The right move is to ask the API what
+    exists rather than to assume a shortlist is the whole catalogue.
+
+    Video generation needs 24 GB. Anything under that cannot run Wan 2.2, so
+    those are excluded here rather than discovered at render time.
+    """
+    try:
+        r = call(salad_cfg, "GET",
+                 f"/organizations/{salad_cfg.organization}/gpu-classes")
+    except SaladError as e:
+        log(f"gpu-classes unreadable: {str(e)[:120]}")
+        from openclude.salad import GPU_CLASSES
+        return [(n, u, 24) for n, u in GPU_CLASSES.items()]
+
+    items = r if isinstance(r, list) else r.get("items", [])
+    out = []
+    for g in items:
+        name = g.get("name", "")
+        uid = g.get("id")
+        if not uid:
+            continue
+        # The class name carries the VRAM, e.g. "RTX 3090 (24 GB)".
+        vram = 0
+        if "(" in name and "GB" in name:
+            try:
+                vram = int(name.split("(")[1].split("GB")[0].strip())
+            except (ValueError, IndexError):
+                vram = 0
+        if vram < MIN_VRAM_GB:
+            continue
+        if not any(m in name.upper() for m in CUDA_VENDOR_MARKERS):
+            continue        # AMD or something else: the CUDA image cannot use it
+        out.append((name, uid, vram))
+    log(f"  {len(out)} CUDA GPU classes with at least {MIN_VRAM_GB} GB")
+    return out
+
+
 def wait_for_capacity(salad_cfg: Config, cfg: cd.ComfyConfig, budget: int,
-                      poll: int) -> str:
+                      poll: int) -> tuple[str, str]:
     """Wait for any usable GPU, and name it.
 
-    Two mistakes are avoided here. The first version pinned one GPU class and
-    gave up when it was busy, which is not the same as there being no capacity:
-    a 3090 Ti, an A5000 and a 4090 are three different pools, and at any moment
-    at least one of them usually has something free. The second mistake was
-    exiting when nothing was free. The person paying is not at the keyboard, and
-    "no capacity right now" is a normal condition on a marketplace of
-    residential PCs, not a failure to report and walk away from.
+    Returns (name, uuid) or ("", "") when the budget runs out. The first
+    version checked three hardcoded classes and gave up when they were busy.
+    The user pointed out that hundreds of cards exist. They do: 32 classes had
+    capacity at that moment, and an RTX 3090 had 65 nodes free. "No capacity"
+    was never true, it was a shortlist of three.
 
-    So: check every class, take whatever is free, and if nothing is, keep
-    checking until the budget runs out.
+    Now it asks the API for the whole catalogue, filters to 24 GB or more
+    because video needs it, and takes whatever has room. If nothing does, it
+    keeps checking rather than exiting, because the person paying is not at
+    the keyboard and this is a marketplace of residential PCs where capacity
+    turns over constantly.
     """
-    from openclude.salad import GPU_CLASSES
-
-    order = [cfg.gpu] + [g for g in GPU_CLASSES if g != cfg.gpu]
+    classes = all_gpu_classes(salad_cfg)
+    if not classes:
+        log("no GPU classes with enough memory were returned")
     deadline = time.time() + budget
     announced = None
     while time.time() < deadline:
-        free: list[tuple[str, int]] = []
-        for name in order:
-            probe = Config(
-                api_key=salad_cfg.api_key,
-                organization=salad_cfg.organization,
-                project=salad_cfg.project,
-                gpu=name, priority=cfg.priority, cpu=cfg.cpu,
-                memory_mb=cfg.memory_mb, storage_bytes=cfg.storage_bytes,
-            )
+        free: list[tuple[int, str, str]] = []
+        for name, uid, _vram in classes:
             try:
-                r = check_capacity(probe)
+                a = call(salad_cfg, "POST",
+                         f"/organizations/{salad_cfg.organization}"
+                         f"/availability/sce-gpu-availability",
+                         {"gpu_classes": [uid], "cpu": cfg.cpu,
+                          "memory": cfg.memory_mb,
+                          "storage_amount": cfg.storage_bytes})
             except Exception:  # noqa: BLE001
                 continue
-            if r.get("ok"):
-                free.append((name, int(r.get("free") or 0)))
+            n = sum(int(a.get(f"available_gpu_{p}", 0) or 0)
+                    for p in ("high", "medium", "low", "batch"))
+            if n:
+                free.append((n, name, uid))
         if free:
-            name, count = free[0]
-            log(f"capacity found: {count} x {name} free at {cfg.priority}")
-            return name
+            # Best card first, most nodes as the tie-break. A 32 GB card renders
+            # video that a 24 GB card has to quantise, and the user asked for
+            # the best one rather than the most numerous one. Node count only
+            # decides between cards that are otherwise equal, because more of
+            # them means less time waiting for a slot.
+            vram_by_name = {n: v for n, _u, v in classes}
+            free.sort(key=lambda t: (vram_by_name.get(t[1], 0), t[0]), reverse=True)
+            count, name, uid = free[0]
+            log(f"capacity: {count} nodes free on {name} "
+                f"({vram_by_name.get(name, '?')} GB), "
+                f"out of {len(free)} classes with room")
+            return name, uid
         if announced != "none":
-            log(f"no capacity at {cfg.priority} for any of "
-                f"{', '.join(order)}. Waiting, not billing.")
+            log(f"no capacity at {cfg.priority} across all {len(classes)} "
+                f"classes right now. Waiting {int(budget / 60)} min, not billing.")
             announced = "none"
         time.sleep(poll)
-    return ""
+    return "", ""
 
 
 def main() -> int:
@@ -170,12 +239,14 @@ def main() -> int:
 
     # Half the budget looking for a GPU, half running. The search can legitimately
     # take a long time, and the run has to leave room to actually happen.
-    gpu = wait_for_capacity(salad_cfg, cfg, budget // 2, poll)
-    if not gpu:
+    gpu_name, gpu_id = wait_for_capacity(salad_cfg, cfg, budget // 2, poll)
+    if not gpu_name:
         log("no GPU became available. Nothing was started and nothing was billed.")
         return 1
-    cfg.gpu = gpu
+    cfg.gpu = gpu_name
+    cfg.gpu_id = gpu_id
     log(f"gpu   : {cfg.gpu} / {cfg.priority}")
+    log(f"        id {gpu_id}")
 
     spec = cd.group_spec(cfg)
     log("spec: " + " ".join(

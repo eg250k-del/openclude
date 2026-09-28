@@ -19,7 +19,21 @@
 
 FROM ghcr.io/saladtechnologies/comfyui-api:comfy0.3.43-api1.9.1-torch2.7.1-cuda12.8-runtime
 
-# The web interface, on the port the access domain name forwards to.
+# Both ports are used, and this is not decoration.
+#
+# 8188 is the ComfyUI web interface, which is what the user opens. The gateway
+# forwards here, so this is the port that must be in the container group's
+# networking.
 EXPOSE 8188
+# 3000 is the ComfyUI API wrapper, which is what the health and readiness
+# probes hit, because it has /health and /ready.
+EXPOSE 3000
 
-CMD ["./comfyui-api"]
+# The wrapper does not start ComfyUI by itself. Without this the container
+# answers /ready on 3000, the probe goes green, the gateway forwards to 8188,
+# and the user gets "Route GET:/ not found" because nothing is listening there.
+# That is exactly what happened.
+#
+# Both logs go to stdout, which is where the Portal's Container Logs tab reads,
+# so a failure here is visible without any further tooling.
+CMD ["bash", "-c", "python3 -u main.py --listen 0.0.0.0 --port 8188 & exec ./comfyui-api"]

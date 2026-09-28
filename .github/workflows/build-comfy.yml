@@ -82,5 +82,10 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No build cache on purpose. The base image is 6-16 GB of third-party
+          # content, so type=gha tries to re-upload the whole thing and fills
+          # the 10 GB repository cache limit, which fails the build at 99
+          # percent. The layer is a single FROM plus CMD, so there is nothing
+          # worth caching anyway.
+          cache-from: ""
+          cache-to: ""

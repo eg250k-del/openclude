@@ -70,6 +70,28 @@ def test_an_unknown_gpu_is_refused_before_the_api_is_called() -> None:
         cd.gpu_class_ids("RTX 9999")
 
 
+def test_a_discovered_id_beats_the_shortlist() -> None:
+    """The account has 49 classes and the shortlist has three.
+
+    The capacity search picks from all 49, and then the chosen name was looked
+    up in the three and raised, one line after correctly finding 63 free nodes.
+    So an id that has already been discovered is used as-is.
+    """
+    found = "91b76f19-cbe4-4ef6-a174-c808e6fdad50"
+    assert cd.gpu_class_ids("AMD RX 7900 XTX (24GB)", found) == [found]
+
+
+def test_the_id_flows_into_the_spec(monkeypatch) -> None:
+    for name in ("SALAD_ORGANIZATION", "SALAD_PROJECT", "SALAD_API_KEY",
+                 "OPENCLIDE_IMAGE"):
+        monkeypatch.setenv(name, f"t-{name.lower()}")
+    cfg = cd.ComfyConfig.from_env()
+    cfg.gpu = "RTX 3090 (24 GB)"
+    cfg.gpu_id = "a5db5c50-cbcb-4596-ae80-6a0c8090d80f"
+    spec = cd.group_spec(cfg)
+    assert spec["container"]["resources"]["gpu_classes"] == [cfg.gpu_id]
+
+
 def test_probe_headers_are_an_array(spec) -> None:
     for name in ("startup_probe", "readiness_probe", "liveness_probe"):
         assert isinstance(spec[name]["http"]["headers"], list), name

@@ -1,79 +1,56 @@
 # PLAN — ComfyUI on cloud GPUs, with storage that survives
 
 **Read this first in any new session.** It is the whole plan. `HANDOFF.json`
-has the machine-readable version and `PROJECT_STATUS.md` has the history of
-how the previous attempt went.
+has the machine-readable version and `PROJECT_STATUS.md` has the history.
 
 ---
 
-## What the user actually wants
+## THE URL — it works
 
-In their own words, roughly:
+```
+https://parmesan-jicama-ji54x1onjwo3px9i.salad.cloud
+```
 
-> Install ComfyUI, download the video and image models, rent a cloud GPU,
-> open the ComfyUI interface from my browser, and make videos. The tools
-> download through the cloud machine so my own internet is not used. It
-> worked. The only problem was that closing the container and coming back
-> lost everything, and I had to start over.
+Opening it returns 200 and serves the ComfyUI interface. Verified:
 
-So: **the ComfyUI web interface, on a rented GPU, that does not forget.**
-
-**Explicitly not wanted:** a story-to-film pipeline, a script writer, a job
-queue, a headless render service, two-hour unattended renders, or a CLI with
-no visible output. A previous attempt built all of that. It was the wrong
-thing and it is being abandoned, not extended.
-
----
-
-## What already works and must be reused
-
-These are real, tested, and were verified against live services. Do not
-rebuild them.
-
-| Thing | Where | State |
+| path | status | meaning |
 |---|---|---|
-| Private file storage | `src/openclude/storage.py`, `HFStore` | **verified against a live repo** |
-| Storage doctor | `python -m openclude.cli store` | **verified** |
-| SaladCloud client | `src/openclude/salad.py` | **verified**, every command tested live |
-| Unattended watcher | `tools/watch.py` | tested, stops the GPU on a budget |
-| Credentials | `C:\Users\Pc\.openclude\env.ps1` | **outside the repo, never commit** |
-| Container group | `openclude-v2`, org `mostafa-ai`, project `aoutooanimation` | deployed, stopped |
-| AI Gateway key | same env file | working, 4 models listed |
+| `/` | 200 | the interface |
+| `/api/system_stats` | 200 | the GPU is visible |
+| `/api/object_info` | 200, 389 KB | every node and model the build has |
 
-### Credentials already in place
+Container logs, from the Portal's Container Logs tab:
 
 ```
-HF_REPO        mostaa2500/openclude   (private)
-HF_TOKEN       write, one token only
-LLM_BASE_URL   https://ai.salad.cloud/v1
-LLM_API_KEY    Salad AI Gateway
-SALAD_API_KEY  SaladCloud API
-SALAD_ORGANIZATION / SALAD_PROJECT / OPENCLIDE_GROUP
+ComfyUI 0.3.43 started.
+Comfy UI started
+To see the GUI go to: http://*:8188
+ComfyUI API 1.9.1 started.
+Server listening at http://[::]:3000
+GET /health -> 200
+Starting Comfy and any warmup workflow took 6.065s
 ```
 
-Load them with:
-
-```powershell
-. "$env:USERPROFILE\.openclude\env.ps1"
-```
+**It starts in six seconds and has zero models loaded**, which is what the
+user asked for: the container is empty and fast, the user opens it and picks
+what they want.
 
 ---
 
-## Why the storage problem is already solved
+## The setup, in the order it was done
 
-SaladCloud deletes a container's disk the moment the container stops, and
-volume mounts are unsupported because containers are unprivileged. So models
-and outputs have to live somewhere else.
+### 1. Storage, because it is the whole point
 
-That somewhere else is a **private Hugging Face dataset repo**, chosen because
-it is free, needs no credit card, and `huggingface_hub` was already in the
-image for fetching model weights.
+SaladCloud deletes a container's disk when the container stops, and volume
+mounts are unsupported because containers are unprivileged. So a private
+Hugging Face dataset repo holds everything that must survive.
 
-**This was the fix for exactly the problem the user described.** A previous
-session recorded that the same setup was being used with ChatGPT and worked,
-except that nothing survived a restart. The repo is the difference.
+```
+repo    mostaa2500/openclude   (private)
+env     C:\Users\Pc\.openclude\env.ps1   (outside the repo, on purpose)
+```
 
-Test it any time:
+Verified against the live repo, not just in tests:
 
 ```powershell
 . "$env:USERPROFILE\.openclude\env.ps1"
@@ -81,202 +58,156 @@ Test it any time:
 ```
 
 It prints `signed in as`, `can write: yes, verified`, and how much of the free
-tier is used. A dead token is reported as a failure, not as an empty repo.
+tier is used. A dead token is reported as a failure, not as an empty repo,
+which was a bug it found.
 
----
+### 2. The image
 
-## The plan
-
-The order the user described, in their own words, is the plan. Do not reverse it.
-
-> You start the container, I give you the address. You open ComfyUI, you pick
-> a template, ComfyUI tells you which tools that needs, and that is when I put
-> them in external storage so the next time they are already there.
-
-So: the user's hands are on the interface, and the agent's job is the
-plumbing behind it. The agent does not pick templates, does not choose models
-for the user, and does not decide what to generate. The user does. The agent
-makes sure the container is up, the address is reachable, and that whatever the
-user installs or creates survives the container being stopped.
-
-### Step 1 — the container and the address
-
-The ComfyUI group is created and stopped, so it costs nothing:
+`comfy/Dockerfile` is a single `FROM` on the official Salad image:
 
 ```
-group  comfyui
+ghcr.io/saladtechnologies/comfyui-api:comfy0.3.43-api1.9.1-torch2.7.1-cuda12.8-runtime
+```
+
+Read from the live registry, not the documentation: the docs quote a newer
+version pair that does not exist.
+
+**No manifest, no models, no build steps.** The first version shipped a
+manifest with FLUX and Wan 2.2 in it, about 30 GB. The user pointed out what
+that costs: the container took minutes to become usable before anyone had chosen
+anything, on a residential node, and it pre-decided the models, which is the
+user's decision.
+
+Built by `.github/workflows/build-comfy.yml`, separate from the film image
+because the base is 6 to 16 GB and should not delay anything else. No build
+cache: `type=gha` tries to re-upload the whole base layer, fills the 10 GB
+repository cache limit, and fails the build at 99 percent.
+
+### 3. The container group
+
+```
+name  comfyui
 id     5f697aff-7aba-4e80-a778-838aaf72ef60
 port   8188
 image  ghcr.io/eg250k-del/openclude-comfy:latest
 ```
 
-SaladCloud is a marketplace of residential PCs, so all three GPU classes are
-often busy at once. `tools/comfy_watch.py` checks every class, takes whichever
-has capacity, starts the group, and prints the access domain name. It waits
-rather than giving up, and it retries a failed group, because a node that
-vanishes mid-pull is ordinary on home hardware.
+`networking.port` must be **8188**, the ComfyUI interface. It was 3000 for a
+while, which serves the API wrapper instead, and the user saw
+`404 Route GET:/ not found` because the API has no `/` route.
 
-**Success:** the user has a URL that opens the ComfyUI interface.
+The probes point at **3000** `/health` and `/ready`, because that is the port
+that has them. Both ports are real and they do different jobs.
 
-### Step 2 — the user picks a template
+`autostart_policy` is false, so nothing bills unless someone starts it.
 
-This is the user's screen and the user's choice. The agent does not choose a
-template and does not generate anything on the user's behalf.
+### 4. The GPU
 
-**Success:** the user has chosen a template and ComfyUI has listed the tools it
-needs.
+The account has **49 GPU classes**. Only three were checked at first, all three
+showed zero, and the watcher waited while 32 others had capacity.
 
-### Step 3 — the tools, into external storage
+`tools/comfy_watch.py` now reads the whole class list from the API, keeps the
+NVIDIA ones with 24 GB or more, sorts by memory then by free nodes, and takes
+the best. It picked **RTX 5090, 32 GB**.
 
-ComfyUI's manager downloads what the template needs onto the container's disk,
-which SaladCloud deletes when the container stops. This is the step that the
-whole project exists for.
-
-The agent watches what appears under `/opt/ComfyUI/models` and mirrors it into
-the project's Hugging Face repo, so:
-
-```
-first run   ComfyUI downloads 30 GB, the agent saves it
-later runs  the agent restores it, ComfyUI does not download again
-```
-
-**Success:** stop, start, and the user's models are already there.
-
-**A decision to make with the user, not for them:** the base models are tens of
-gigabytes and a free tier holds ten, so they cannot all be kept. Options:
-
-- **Re-download the big ones.** Free, costs minutes, works today. Keep only what
-  is rare: LoRAs, VAEs, custom checkpoints. This is what the film pipeline
-  decided for the same reason.
-- **Keep everything.** Needs a paid bucket, which needs a credit card, which
-  this account does not have.
-
-**The user's own work always goes in the repo**, whatever the decision on the
-models. Generated images and videos are what would actually hurt to lose.
-
-### Step 4 — the first thing the user makes
-
-The user makes something in the interface. The agent's only job is to confirm
-the file exists in the repo, so that the next session can prove it survived.
-
-**Success:** one image the user made is downloadable from their own machine.
-
-### Step 2 — persist the models
-
-The models are 50 GB and the container disk is thrown away. So:
-
-1. On the first run, download the models **through the container**, so the
-   user's own internet is not used, which is what they asked for.
-2. Upload them to the HF repo, under a `models/` prefix.
-3. On every later start, download them from the repo at boot.
-
-Uploading 50 GB to a free tier will not fit. So decide the real shape first:
-
-- **Option A, store only what is expensive:** the LoRAs, VAEs and any custom
-  checkpoints, and let the big base models re-download from HuggingFace, which
-  is free and fast. This is what `HFStore` was designed for.
-- **Option B, store everything:** needs a paid bucket. Not possible without a
-  credit card, which the user does not have.
-
-**Recommend A.** It is the same reasoning already used for the video model
-weights: re-downloading is cheaper than storing.
-
-**Success:** after `stop`, `start`, the models are present again without the
-user doing anything.
-
-### Step 3 — open the interface in the user's browser
-
-SaladCloud has a container gateway for port forwarding. The ComfyUI port
-(8188) has to reach the user's browser.
-
-1. Check what the gateway offers: the Portal shows a URL per running
-   container, or there is an API for it.
-2. If the Portal URL works, the user needs to do nothing.
-3. If it does not, the alternative is an SSH or tunnel port forward.
-
-**Success:** the user opens a URL in their own browser and sees the ComfyUI
-interface. This is the moment the whole project becomes real to them, and it
-should be tested before anything else is polished.
-
-### Step 4 — the first video
-
-1. Load a checkpoint, a text prompt, generate one image.
-2. Load a video model, generate one short clip.
-3. Confirm the output file appears in the repo.
-
-**Success:** one image and one clip exist in the HF repo, downloaded back to
-the user's machine.
+**NVIDIA only.** The first version picked an **AMD RX 7900 XTX** with 24 GB
+free, which cannot run a CUDA PyTorch image at all. A memory number says
+nothing about whether the image was built for the card.
 
 ---
 
-## Cost
+## Every mistake, so none of them is repeated
 
-| | |
-|---|---|
-| One idle hour, stopped | **$0** |
-| One hour running | $0.27 to $0.33 at `high` priority |
-| One 5-second video | about $0.01 |
+### Deployment shapes, each a live 400
 
-`high` priority is needed because at `low` there was no capacity at all,
-checked live. `low` costs about $0.16/h and is worth revisiting once this
-works, because that is where the cheap capacity is supposed to be.
+| what | was | is |
+|---|---|---|
+| `image` | object | plain string |
+| `restart_policy` | object | `"always"` |
+| `memory` | `32` = 32 MB | `32768` = MB |
+| `storage_amount` | `120000` = 117 KB | bytes |
+| `gpu_classes` | `"RTX 4090"` | a UUID from the API |
+| probe `headers` | `{}` | `[]` |
+| `failure_threshold` | `90`, then `40` | max **20** everywhere |
 
-**Always stop the group when finished.** `python -m openclude.salad stop`.
-Leaving it on overnight is the expensive mistake.
+**The unit mistakes are the dangerous ones.** Nothing rejects a valid number in
+the wrong unit, so a dry run cannot catch them and only a container that dies
+on boot will.
 
----
+### Other mistakes, each found the expensive way
 
-## What not to do
-
-These are the mistakes that cost the most time, all of them made in this
-project. Each has a test or a check behind it now.
-
-- **Never deploy an image whose tag you guessed.** The image is tagged with
-  the full 40-character commit SHA. A short SHA is a different tag and the
-  node reports `Manifest Not Found`.
-- **Do not trust `success` from CI.** It means the image built, not that it
-  works. Compare the run's `headSha` with `git rev-parse HEAD`.
-- **Do not print a command's output without checking it for secrets.**
-  SaladCloud echoes the container's environment variables back in every
-  response, so printing any response can print a live token. `safe_json` in
-  `salad.py` handles this; use it.
-- **Do not read container logs from a guessed URL.** It is
-  `GET /organizations/<org>/log-entries?instance_id=...`. A wrong URL returns
-  nothing, which looks exactly like a silent application.
-- **Do not let a probe kill a cold start.** Startup needs minutes for a GPU
-  node, tens of GB of weights, and a contended machine. `startup_probe` with
-  twenty minutes of grace, and a very lenient `liveness_probe`, because a
-  render can hold the process for many minutes.
-- **Do not read the API's limits from memory.** Every one that was guessed
-  wrong produced a live 400: `restart_policy` is a string, `image` is a
-  string, `memory` is in MB, `storage_amount` is in bytes, `gpu_classes` are
-  UUIDs, and every probe `failure_threshold` is capped at 20.
-- **Do not use a feature variable that the user did not ask for.** The
-  language defaults were `"ar"` in three places on a project with no Arabic
+- **Deployed a 7-character SHA as the image tag.** The image is tagged with the
+  full 40-character SHA. A short one is a different tag and the node reports
+  `Manifest Not Found`, which reads like a registry fault.
+- **A manifest pointing at a model repository that does not exist**, at paths
+  taken from documentation rather than a file listing. Every URL is now
+  HEAD-checked in CI, so a bad path fails the build in seconds instead of
+  costing an hour on a rented GPU.
+- **Read container logs from a URL that does not exist**, so the watcher reported
+  "running, no output" for seventeen minutes while the container was
+  crash-looping. A wrong URL and a silent application look identical. The
+  Portal's Container Logs tab is the reliable source.
+- **Pinned three GPU classes and gave up when they were busy.** "No capacity" was
+  never true.
+- **Chose an AMD card.** See above.
+- **`language` defaulted to `"ar"` in three places** on a project with no Arabic
   content, and the tests asserted the wrong value, so nothing caught it.
+- **`HF_TOKEN` printed in full by two commands**, because SaladCloud echoes the
+  container's environment back in every response and one redaction only matched
+  `SECRET` and `KEY`. Every print path now goes through `safe_json`.
+- **A liveness probe killed the container during its weight download**, because
+  the entrypoint downloaded 15 GB before the process serving `/health` existed.
+  A single shot holds the process for minutes, so the probe is now a
+  forty-five-minute backstop and a `startup_probe` covers the cold start.
+- **Believed `success` from CI meant the image worked.** It means the image
+  built. Compare the run's `headSha` with `git rev-parse HEAD`.
+
+### Process mistakes
+
+- **Seven commits sat unpushed for a whole session.** The checkout was on a
+  feature branch, so `git push origin main` pushed the unmoved local `main` and
+  reported "Everything up-to-date", and `git push -q` hid it. See
+  `docs/how-to-push.md`.
+- **Wrote tests while the user waited for a video.** They said several times
+  they wanted to see a result. They were right each time.
 
 ---
 
-## Where the previous attempt went, in one paragraph
+## The order the user described, which is the plan
 
-A story-to-film pipeline was built: an LLM writes a script, a synthesiser
-makes voices, a video model renders shots, and ffmpeg assembles them, with an
-atomic ledger in object storage so a preempted container resumes. It has 554
-passing tests, storage proven against a live repo, a script writer proven
-against a live LLM, and a container group that was deployed and started
-successfully. **It never produced a single frame of video**, because a probe
-configuration killed the container during its weight download, and then a
-long series of API shape errors. The architecture was sound and the delivery
-was zero. The user is right that the simpler thing was wanted.
+> You start the container and open ComfyUI, you pick a template, ComfyUI tells
+> you which tools it needs, and I put them somewhere they survive.
 
-Nothing in that work is wasted: the storage, the SaladCloud client, the
-secrets handling and the deployment discipline are all still needed here.
+The user's hands are on the interface. The agent does the plumbing: the
+container is up, the address works, and whatever the user installs is saved
+before the container is stopped.
+
+### Next: step three, the storage
+
+`tools/model_store.py` mirrors models between the container and the repo:
+
+```
+sync      copy anything new out of the container into the repo
+restore   copy anything in the repo that the container is missing
+```
+
+Neither is wired to the running container yet, because SaladCloud has no exec
+endpoint. The route is the job-queue worker, or driving it from the ComfyUI
+API's `/download` endpoint, which the wrapper already exposes.
+
+**A decision for the user, not for them:** the base models are tens of
+gigabytes and a free tier holds ten, so they cannot all be kept. Re-downloading
+from Hugging Face is free and takes minutes on a cloud node; keeping everything
+needs a paid bucket, which needs a credit card this account does not have.
+Whatever is decided, **the user's own generated images and videos always go in
+the repo.**
 
 ---
 
 ## The one test that matters
 
-**A video exists in the repo, and the user watched it in their browser.**
+**The user opens the URL, picks a template, and something appears in the repo
+afterwards.** Not the test count. Not the code. That.
 
-Nothing else counts. Not the test count, not the code, not the deployment.
-Say so plainly until that happens.
+It works up to the first half now: the URL answers and the interface is
+served. The second half is unproven.
