@@ -133,10 +133,38 @@ def test_the_container_exposes_the_web_ui_port() -> None:
     assert "8188" in DOCKERFILE.read_text("utf-8")
 
 
-def test_the_manifest_is_copied_in_and_named() -> None:
+def test_the_image_ships_no_models() -> None:
+    """The container must start empty.
+
+    A manifest with 30 GB of models in it made the container take minutes to
+    become usable before anyone had chosen anything, on a residential node
+    where the download is slow enough to look broken. It also pre-decided the
+    models, which is the user's choice and not this file's.
+
+    So: no manifest, no COPY, no ENV MANIFEST. The user opens the interface,
+    picks a template, and only then does anything get downloaded.
+    """
     text = DOCKERFILE.read_text("utf-8")
-    assert "COPY manifest.yaml" in text
-    assert "MANIFEST" in text
+    for banned in ("COPY manifest", "ENV MANIFEST"):
+        assert banned not in text, (
+            f"{banned} is in the Dockerfile. The container must start empty and "
+            f"fast; the user picks templates in the interface and the tools are "
+            f"downloaded then, not baked in at boot."
+        )
+
+
+def test_the_image_is_only_a_from_line_and_a_cmd() -> None:
+    """Nothing is installed at build time either."""
+    body = [
+        ln.strip() for ln in DOCKERFILE.read_text("utf-8").splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    assert body[0].startswith("FROM "), body[:1]
+    assert not any(ln.startswith("RUN ") for ln in body), (
+        "a RUN step at build time makes the image slower to pull, and the image "
+        "is downloaded whole before anything runs"
+    )
+    assert not any(ln.startswith("COPY ") for ln in body), body
 
 
 # --------------------------------------------------------------------------

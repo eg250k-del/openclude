@@ -87,19 +87,79 @@ tier is used. A dead token is reported as a failure, not as an empty repo.
 
 ## The plan
 
-### Step 1 — find the right ComfyUI image
+The order the user described, in their own words, is the plan. Do not reverse it.
 
-SaladCloud's own catalog has ComfyUI images, so there may be nothing to
-build. The original work that was done with ChatGPT used one of them.
+> You start the container, I give you the address. You open ComfyUI, you pick
+> a template, ComfyUI tells you which tools that needs, and that is when I put
+> them in external storage so the next time they are already there.
 
-1. List what is available, from the API, not from memory:
-   `GET /organizations/<org>/container-group/images` (name to be confirmed
-   from the Salad API reference)
-2. Compare candidates on: does it include the manager, does it run headless,
-   is the disk big enough for 50 GB of models, does it stay up.
-3. Write the chosen image into the env file as `COMFY_IMAGE`.
+So: the user's hands are on the interface, and the agent's job is the
+plumbing behind it. The agent does not pick templates, does not choose models
+for the user, and does not decide what to generate. The user does. The agent
+makes sure the container is up, the address is reachable, and that whatever the
+user installs or creates survives the container being stopped.
 
-**Success:** a container group starts from that image and stays running.
+### Step 1 — the container and the address
+
+The ComfyUI group is created and stopped, so it costs nothing:
+
+```
+group  comfyui
+id     5f697aff-7aba-4e80-a778-838aaf72ef60
+port   8188
+image  ghcr.io/eg250k-del/openclude-comfy:latest
+```
+
+SaladCloud is a marketplace of residential PCs, so all three GPU classes are
+often busy at once. `tools/comfy_watch.py` checks every class, takes whichever
+has capacity, starts the group, and prints the access domain name. It waits
+rather than giving up, and it retries a failed group, because a node that
+vanishes mid-pull is ordinary on home hardware.
+
+**Success:** the user has a URL that opens the ComfyUI interface.
+
+### Step 2 — the user picks a template
+
+This is the user's screen and the user's choice. The agent does not choose a
+template and does not generate anything on the user's behalf.
+
+**Success:** the user has chosen a template and ComfyUI has listed the tools it
+needs.
+
+### Step 3 — the tools, into external storage
+
+ComfyUI's manager downloads what the template needs onto the container's disk,
+which SaladCloud deletes when the container stops. This is the step that the
+whole project exists for.
+
+The agent watches what appears under `/opt/ComfyUI/models` and mirrors it into
+the project's Hugging Face repo, so:
+
+```
+first run   ComfyUI downloads 30 GB, the agent saves it
+later runs  the agent restores it, ComfyUI does not download again
+```
+
+**Success:** stop, start, and the user's models are already there.
+
+**A decision to make with the user, not for them:** the base models are tens of
+gigabytes and a free tier holds ten, so they cannot all be kept. Options:
+
+- **Re-download the big ones.** Free, costs minutes, works today. Keep only what
+  is rare: LoRAs, VAEs, custom checkpoints. This is what the film pipeline
+  decided for the same reason.
+- **Keep everything.** Needs a paid bucket, which needs a credit card, which
+  this account does not have.
+
+**The user's own work always goes in the repo**, whatever the decision on the
+models. Generated images and videos are what would actually hurt to lose.
+
+### Step 4 — the first thing the user makes
+
+The user makes something in the interface. The agent's only job is to confirm
+the file exists in the repo, so that the next session can prove it survived.
+
+**Success:** one image the user made is downloadable from their own machine.
 
 ### Step 2 — persist the models
 
