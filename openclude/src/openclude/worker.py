@@ -107,7 +107,10 @@ class Job:
     story: str
     film_id: str
     target_minutes: int
-    language: str = "ar"
+    # English, not "ar". See pipeline.Config: the default was Arabic in three
+    # places, and a job that omits the field would have had English narration
+    # synthesised with an Arabic voice.
+    language: str = "en"
     characters: list[dict] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:

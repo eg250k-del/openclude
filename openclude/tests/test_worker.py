@@ -142,7 +142,12 @@ def test_an_empty_queue_is_not_an_error(tmp_path, monkeypatch) -> None:
 def test_a_job_defaults_its_character_list() -> None:
     job = worker.Job(id="j", story="s", film_id="f", target_minutes=1)
     assert job.characters == []
-    assert job.language == "ar"
+
+
+def test_a_job_defaults_to_english() -> None:
+    """It was "ar", which would have spoken an English story with an Arabic voice."""
+    assert worker.Job(id="j", story="s", film_id="f",
+                      target_minutes=1).language == "en"
 
 
 # --------------------------------------------------------------------------

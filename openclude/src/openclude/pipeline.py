@@ -41,7 +41,11 @@ class PipelineError(RuntimeError):
 @dataclass
 class Config:
     film_id: str = "f01"
-    language: str = "ar"
+    # English. This was "ar" in three places across the codebase, on a project
+    # with no Arabic content, and the first real LLM call inherited it and would
+    # have sent English narration to an Arabic voice. A default should be the
+    # common case, not an accident of whoever wrote the file first.
+    language: str = "en"
     target_minutes: int = 1
     model_type: str = "ti2v_2_2_fastwan"
     max_attempts: int = 4
