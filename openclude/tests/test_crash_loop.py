@@ -93,9 +93,36 @@ def test_a_startup_probe_exists(config) -> None:
 def test_the_startup_probe_outlasts_a_cold_start(config) -> None:
     """15 GB of weights plus a contended node. Twenty minutes of grace."""
     probe = salad.group_spec(config)["startup_probe"]
-    assert 1 <= probe["failure_threshold"] <= 20 or probe["failure_threshold"] == 40
     grace = probe["failure_threshold"] * probe["period_seconds"]
     assert grace >= 900, f"only {grace}s of startup grace"
+
+
+def test_no_probe_threshold_exceeds_the_api_cap(config) -> None:
+    """Every probe threshold is capped at 20, and the cap is a real 400.
+
+    The startup probe was written with a threshold of 40 on the reasoning that
+    it was somehow exempt, and an earlier version of this test explicitly
+    allowed that. The deploy failed with "StartupProbe.FailureThreshold must be
+    between 1 and 20", which is the third time this cap has been discovered from
+    a live 400 rather than from the documentation.
+
+    So the test no longer encodes an exception: it walks every probe and holds
+    each threshold to the same limit.
+
+    Only the two threshold fields are capped. period_seconds and
+    initial_delay_seconds are not, and liveness deliberately uses a two-minute
+    period, because that is how a long grace period is expressed when the
+    threshold is capped at 20.
+    """
+    for name, probe in salad.group_spec(config).items():
+        if not name.endswith("_probe"):
+            continue
+        for field in ("failure_threshold", "success_threshold"):
+            assert 1 <= probe[field] <= 20, (
+                f"{name}.{field} is {probe[field]}; the API caps it at 20"
+            )
+        assert probe["timeout_seconds"] > 0
+        assert probe["timeout_seconds"] <= probe["period_seconds"], name
 
 
 def test_liveness_does_not_fire_during_startup(config) -> None:
@@ -142,6 +169,18 @@ def test_every_probe_threshold_is_within_the_api_cap(config) -> None:
         probe = salad.group_spec(config)[name]
         assert probe["period_seconds"] >= 5, name
         assert probe["timeout_seconds"] <= probe["period_seconds"], name
+
+
+def test_the_replicas_are_within_the_documented_range(config) -> None:
+    """replicas is 0-500. Not a probe, but the same class of limit."""
+    spec = salad.group_spec(config)
+    assert 0 <= spec["replicas"] <= 500
+
+
+def test_priority_is_one_of_the_documented_values(config) -> None:
+    """high, medium, low, batch. Anything else is a 400 with no detail."""
+    assert salad.group_spec(config)["container"]["priority"] in (
+        "high", "medium", "low", "batch")
 
 
 def test_probe_grace_covers_a_weight_download(config) -> None:

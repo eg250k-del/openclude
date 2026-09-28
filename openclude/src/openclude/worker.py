@@ -21,7 +21,7 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,13 @@ class _State:
     detail = "starting"
     shots_done = 0
     shots_total = 0
+    # For the status page. The person paying is not an operator, and the
+    # question they actually have is "is anything happening", which a count
+    # cannot answer on its own.
+    film: str = ""
+    shot_in_progress: str = ""
+    started: float = 0.0
+    errors: list[str] = field(default_factory=list)
 
 
 STATE = _State()
@@ -61,14 +68,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, code: int, body: dict) -> None:
         blob = json.dumps(body).encode("utf-8")
+        self._raw(code, blob, "application/json")
+
+    def _raw(self, code: int, blob: bytes, ctype: str) -> None:
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(blob)))
         self.end_headers()
         self.wfile.write(blob)
 
+    def _esc(self, value: object) -> str:
+        return (str(value).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;"))
+
     def do_GET(self) -> None:  # noqa: N802
-        if self.path.startswith("/health"):
+        if self.path in ("/", "/index.html"):
+            self._raw(200, self._html(), "text/html; charset=utf-8")
+        elif self.path.startswith("/health"):
             # liveness only: is this process still thinking
             self._send(200, {"status": "ok", "detail": STATE.detail})
         elif self.path.startswith("/ready"):
@@ -76,8 +92,64 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"status": "ready", **self._progress()})
             else:
                 self._send(503, {"status": "not-ready", "detail": STATE.detail})
+        elif self.path.startswith("/status"):
+            self._send(200, self._status_page())
         else:
             self._send(404, {"error": "not found"})
+
+    def _status_page(self) -> dict[str, Any]:
+        """Everything a person would want to see, in one request.
+
+        /health and /ready exist for the platform and answer yes or no. This
+        one exists because the person paying is not an operator: they want to
+        know what stage the film is at, in words, without reading container
+        logs. It is the answer to "is anything actually happening".
+        """
+        return {
+            "state": "ready" if STATE.ready else "starting",
+            "detail": STATE.detail,
+            **self._progress(),
+            "shot_in_progress": STATE.shot_in_progress,
+            "film": STATE.film,
+            "started": STATE.started,
+            "elapsed_seconds": (
+                round(time.time() - STATE.started, 1) if STATE.started else 0
+            ),
+            "errors": STATE.errors[-10:],
+        }
+
+    def _html(self) -> bytes:
+        s = self._status_page()
+        pct = 0
+        if s["shots_total"]:
+            pct = int(100 * s["shots_done"] / s["shots_total"])
+        rows = "".join(f"<li>{_esc(e)}</li>" for e in s["errors"]) or "<li>none</li>"
+        page = f"""<!doctype html><meta charset=utf-8>
+<title>openclude</title>
+<style>
+ body{{font:16px/1.6 system-ui,sans-serif;margin:2rem auto;max-width:44rem;
+      background:#111;color:#eee}}
+ h1{{font-size:1.3rem;margin:0 0 .2rem}} .sub{{color:#888;margin-bottom:1.5rem}}
+ .bar{{height:1.4rem;background:#333;border-radius:.3rem;overflow:hidden;
+       margin:.6rem 0 1rem}}
+ .bar i{{display:block;height:100%;background:#4a9;width:{pct}%}}
+ .row{{display:flex;gap:2rem;flex-wrap:wrap;margin-bottom:1rem}}
+ .k{{color:#888;font-size:.8rem;text-transform:uppercase}}
+ .v{{font-size:1.15rem}}
+ ul{{color:#f88;font-size:.85rem}}
+</style>
+<h1>openclude</h1>
+<div class=sub>story to film, unattended</div>
+<div class=bar><i></i></div>
+<div class=row>
+ <div><div class=k>stage</div><div class=v>{_esc(s["state"])}</div></div>
+ <div><div class=k>detail</div><div class=v>{_esc(s["detail"])}</div></div>
+ <div><div class=k>shots</div><div class=v>{s["shots_done"]} / {s["shots_total"]}</div></div>
+ <div><div class=k>film</div><div class=v>{_esc(s["film"] or "-")}</div></div>
+ <div><div class=k>uptime</div><div class=v>{s["elapsed_seconds"]}s</div></div>
+</div>
+<div class=k>recent errors</div><ul>{rows}</ul>"""
+        return page.encode("utf-8")
 
     def _progress(self) -> dict[str, Any]:
         return {
@@ -145,6 +217,7 @@ def run_job(job: Job, store: Any, deps: dict) -> int:
     from .schema import Character, CharacterView
 
     STATE.shots_total = 0
+    STATE.film = job.film_id
     cast = [
         Character(
             id=c["id"],
@@ -173,7 +246,7 @@ def run_job(job: Job, store: Any, deps: dict) -> int:
         cfg, store, deps["writer"], deps["synth"], adapter.render, cast
     )
 
-    STATE.detail = f"film={job.film_id}"
+    STATE.detail = f"writing the script for {job.film_id}"
     try:
         result = pipeline.run(job.story)
     except ScriptError as exc:
@@ -285,16 +358,31 @@ def main() -> int:
             jobs = poll_queue(store, "queue/pending/")
         except Exception as exc:  # noqa: BLE001
             log.warning("queue poll failed: %s", exc)
+            STATE.errors.append(f"queue: {exc}")
             jobs = []
         for job in jobs:
             if stopping.is_set():
                 break
             try:
                 store.delete(f"queue/pending/{job.id}.json")
-            except Exception:  # noqa: BLE001
-                pass
-            run_job(job, store, deps)
+            except Exception as exc:  # noqa: BLE001
+                # Not swallowed silently: a job that cannot be claimed will be
+                # picked up again by the next instance, and that is fine. But
+                # if it is a permissions problem it will repeat forever, so it
+                # belongs on the status page.
+                log.warning("could not claim %s: %s", job.id, exc)
+                STATE.errors.append(f"claim {job.id}: {exc}")
+            try:
+                run_job(job, store, deps)
+            except Exception as exc:  # noqa: BLE001
+                # A job that crashes must not take the worker down with it. The
+                # ledger in object storage is what makes a restart resumable,
+                # so the next instance continues rather than starting over.
+                log.exception("job %s failed", job.id)
+                STATE.errors.append(f"job {job.id}: {exc}")
+                STATE.detail = f"job {job.id} failed: {exc}"[:200]
             STATE.shots_done = 0
+            STATE.film = ""
         time.sleep(5)
 
     log.info("stopping cleanly")

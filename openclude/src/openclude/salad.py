@@ -374,9 +374,12 @@ def group_spec(cfg: Config) -> dict[str, Any]:
             # cannot do this job: until it passes, liveness failures are counted
             # as crashes.
             "initial_delay_seconds": 30,
-            "period_seconds": 30,
+            "period_seconds": 60,
             "timeout_seconds": 10,
-            "failure_threshold": 40,        # 20 minutes of grace
+            # The API caps this at 20 as well, which the live 400 proved. So the
+            # twenty minutes of grace comes from period_seconds, not from a
+            # bigger threshold: 20 x 60s = 1200s.
+            "failure_threshold": 20,
             "success_threshold": 1,
         },
         # No queue_autoscaler and no queue_connection, on purpose.
