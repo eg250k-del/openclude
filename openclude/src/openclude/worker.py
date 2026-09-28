@@ -225,7 +225,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, shutdown)
 
     store = build_store()
-    STATE.detail = "connecting to the engine"
+    STATE.detail = "downloading model weights"
 
     adapter = WanGPAdapter(
         paths=EnginePaths(
@@ -249,6 +249,20 @@ def main() -> int:
         # staying alive lets the liveness probe pass and the retry happen.
         log.error("engine did not start: %s", exc)
         STATE.detail = f"engine unavailable: {exc}"
+
+    # Weights, if they are not there yet, are fetched after the health server
+    # is already listening. Not before: see WanGPAdapter.prefetch. The engine's
+    # own init will not notice a partial download, so a missing VAE surfaces as
+    # an unrelated error much later, and a preflight that says which files it
+    # just fetched turns that into a log line.
+    try:
+        fetched = adapter.prefetch(MODEL)
+        log.info("weights present: %s", ", ".join(fetched) or "(engine reported none)")
+        STATE.detail = "loading the engine"
+    except Exception as exc:  # noqa: BLE001
+        # Not fatal. The engine's own init may still find what it needs, and
+        # refusing to start over a prefetch would lose a working render.
+        log.warning("weight prefetch failed: %s", exc)
 
     # Built after start(), not before: the speech backend picks engine mode
     # based on having a live session, and adapter.render needs the session too.

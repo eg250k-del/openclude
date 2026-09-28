@@ -90,48 +90,21 @@ sys.exit(0 if torch.cuda.is_available() else 1)
 PY
 
 # ---------------------------------------------------------------- 4. weights
-# Fetched through the engine so the URL list lives in defaults/*.json.
+# Deliberately nothing here.
 #
-# Weights are deliberately NOT put in object storage. They are public on
-# HuggingFace and total roughly 15 GB, which is more than any free tier offers,
-# and a container is scheduled onto a fresh node often enough that the download
-# is paid for regularly. 15 GB at the node speeds Salad reports is about three
-# minutes, which is cheaper than owning a bucket big enough to hold them.
-# Downloads are skipped when the files are already on this node's disk.
-if [ "${OPENCLIDE_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
-  log "ensuring model weights for ${MODEL}"
-  python3.11 - "$ENGINE" "$MODEL" <<'PY' || log "WARNING: weight prefetch failed; the render stage will retry"
-import importlib, json, sys
-from pathlib import Path
-
-engine, model = Path(sys.argv[1]), sys.argv[2]
-sys.path.insert(0, str(engine))
-importlib.import_module("wgp")
-
-definition = json.loads((engine / "defaults" / f"{model}.json").read_text("utf-8"))
-need = [u for u in definition.get("URLs", []) if "quanto" in u or "int8" in u] or definition.get("URLs", [])
-need = need[:1] + definition.get("VAE_URLs", [])[:1]
-need += definition.get("text_encoder_URLs", [])[:1]
-
-for key in ("URLs2", "loras", "preload_URLs"):
-    extra = definition.get(key, [])
-    if isinstance(extra, list) and extra and isinstance(extra[0], str):
-        need += extra[:1]
-
-from shared.utils.download import download_file
-from shared.utils.files_locator import get_smart_download_location
-
-for url in need:
-    name = url.rsplit("/", 1)[-1]
-    target = get_smart_download_location(name)
-    if Path(target).exists() and Path(target).stat().st_size > 0:
-        print(f"[entrypoint] have {name}")
-        continue
-    print(f"[entrypoint] fetching {name}")
-    download_file(url, target)
-print("[entrypoint] weights ready")
-PY
-fi
+# The weight download used to run in this script, before the worker started.
+# That meant nothing served port 8000 for the three minutes the download took,
+# the liveness probe counted that as failure, the container was killed, and
+# `restart_policy: always` turned it into a loop. The group reported `running`
+# and then `creating`, over and over, writing nothing at all.
+#
+# The download now lives in the worker, after the health server is listening,
+# so /health answers within a second and reports "downloading model weights"
+# while it happens. See WanGPAdapter.prefetch.
+#
+# The other reason to move it: this heredoc imported `wgp`, which is not the
+# module anything calls. The renderer uses `shared.api`. The step could not
+# have worked even if it had been reached.
 
 # ------------------------------------------------------------------- 5. work
 log "starting the openclude worker"

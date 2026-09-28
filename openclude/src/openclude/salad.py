@@ -330,10 +330,24 @@ def group_spec(cfg: Config) -> dict[str, Any]:
         },
         "liveness_probe": {
             "http": {**probe_common, "port": 8000, "path": "/health"},
-            "initial_delay_seconds": 60,
-            "period_seconds": 30,
+            # Deliberately very lenient, because this is not a web service.
+            #
+            # A shot is one generation, and a single generation can occupy the
+            # process for many minutes with the event loop busy. A timeout-based
+            # liveness probe therefore kills healthy renders: that is precisely
+            # what happened, six times over, while the container downloaded its
+            # weights.
+            #
+            # A dead process does not need a probe: it exits, the container
+            # stops, and `restart_policy: always` recreates it. So liveness here
+            # is only a backstop for a process that is alive but wedged, and
+            # forty-five minutes of unresponsiveness is a safe threshold for
+            # that. A test asserts this grace exceeds the startup grace, so
+            # liveness can never be the thing that kills a cold start.
+            "initial_delay_seconds": 300,
+            "period_seconds": 120,
             "timeout_seconds": 10,
-            "failure_threshold": 6,
+            "failure_threshold": 20,       # 40 minutes
             "success_threshold": 1,
         },
         "readiness_probe": {
@@ -350,6 +364,19 @@ def group_spec(cfg: Config) -> dict[str, Any]:
             "period_seconds": 15,
             "timeout_seconds": 10,
             "failure_threshold": 20,
+            "success_threshold": 1,
+        },
+        "startup_probe": {
+            "http": {**probe_common, "port": 8000, "path": "/health"},
+            # Covers a cold start on a contended node: the container has to be
+            # scheduled, the image pulled, the engine imported and roughly 15 GB
+            # of weights downloaded before it can be useful. Readiness alone
+            # cannot do this job: until it passes, liveness failures are counted
+            # as crashes.
+            "initial_delay_seconds": 30,
+            "period_seconds": 30,
+            "timeout_seconds": 10,
+            "failure_threshold": 40,        # 20 minutes of grace
             "success_threshold": 1,
         },
         # No queue_autoscaler and no queue_connection, on purpose.

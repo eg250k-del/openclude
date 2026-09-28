@@ -13,6 +13,7 @@ raises the stakes on two behaviours, and both are tested here:
 from __future__ import annotations
 
 import importlib.util
+import inspect
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,17 @@ def config(monkeypatch):
                  "SALAD_API_KEY"):
         monkeypatch.setenv(name, f"t-{name.lower()}")
     return salad.Config.from_env()
+
+
+def _is_logs(path: str) -> bool:
+    """The watcher reads the organisation's log-entries, not /instances/<id>/logs.
+
+    The first version of the watcher used the second, which does not exist, so
+    it reported no output for seventeen minutes while the container was
+    crash-looping. Every fake below has to answer the endpoint that is really
+    used, or the test passes while the watcher is broken.
+    """
+    return "log-entries" in path
 
 
 def _group(status: str, counts: dict, desc: str = "") -> dict:
@@ -67,7 +79,7 @@ def test_the_watcher_stops_on_failure_and_does_not_keep_waiting(watcher, config,
         calls.append((m, p))
         if m == "GET" and p.endswith("/instances"):
             return {"items": [{"id": "i1"}]}
-        if m == "GET" and "/logs" in p:
+        if m == "GET" and _is_logs(p):
             return {"items": [{"message": "entrypoint: FATAL: no storage"}]}
         if m == "GET":
             return _group("failed", {})
@@ -89,7 +101,7 @@ def test_a_running_instance_is_reported_with_its_logs(watcher, config,
     def fake_call(cfg, m, p, b=None):
         if m == "GET" and p.endswith("/instances"):
             return {"items": [{"id": "i1", "state": "running"}]}
-        if m == "GET" and "/logs" in p:
+        if m == "GET" and _is_logs(p):
             return {"items": [{"message": "wrote 15 shots"}]}
         if m == "GET":
             return _group("running", {"running_count": 1})
@@ -103,6 +115,60 @@ def test_a_running_instance_is_reported_with_its_logs(watcher, config,
 
     watcher.main()
     assert any("wrote 15 shots" in m for m in captured)
+
+
+def test_the_logs_endpoint_is_the_one_that_exists(watcher) -> None:
+    """`/organizations/<org>/log-entries?instance_id=`.
+
+    The watcher first asked `/instances/<id>/logs`, which does not exist. It
+    returned nothing, which the watcher reported as "RUNNING with no output",
+    and the real container was crash-looping at the time. A wrong URL and a
+    silent application are indistinguishable, so this is asserted directly
+    against the endpoint the live API accepts.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(watcher.last_logs)))
+    fn = tree.body[0]
+    doc = ast.get_docstring(fn) or ""
+    # The docstring explains that the old endpoint was wrong, so it necessarily
+    # contains the wrong URL. Only the executable body can be checked.
+    body = "\n".join(
+        ast.unparse(n) for n in fn.body
+        if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+                and isinstance(n.value.value, str))
+    )
+    assert doc, "the function should record why it looks the way it does"
+    assert "log-entries" in body
+    assert "/instances/" not in body, "that endpoint does not exist"
+
+
+def test_the_log_endpoint_is_the_one_the_command_already_used(watcher) -> None:
+    """cmd_logs was working. The watcher ignored it and guessed.
+
+    That is the actual mistake: a working path already existed in the same
+    codebase, written down and correct, and the new code re-derived a different
+    one.
+    """
+    assert "log-entries" in inspect.getsource(salad.cmd_logs)
+
+
+def test_no_log_entries_is_reported_as_unknown_not_as_silence(watcher, config,
+                                                               monkeypatch) -> None:
+    """"(no log entries)" is a statement about the reader's ignorance."""
+    monkeypatch.setattr(watcher, "call",
+                        lambda cfg, m, p, b=None: {"logs": []})
+    out = watcher.last_logs(config, "i1")
+    assert "no log entries" in out.lower()
+
+
+def test_a_failed_log_read_says_so(watcher, config, monkeypatch) -> None:
+    def boom(cfg, m, p, b=None):
+        raise salad.SaladError("500 Internal Server Error")
+    monkeypatch.setattr(watcher, "call", boom)
+    assert "unavailable" in watcher.last_logs(config, "i1")
 
 
 def test_a_running_group_is_only_stopped_when_the_budget_runs_out(watcher, config,
@@ -123,7 +189,7 @@ def test_a_running_group_is_only_stopped_when_the_budget_runs_out(watcher, confi
             return {}
         if m == "GET" and p.endswith("/instances"):
             return {"items": [{"id": "i1", "state": "running"}]}
-        if m == "GET" and "/logs" in p:
+        if m == "GET" and _is_logs(p):
             return []
         if m == "GET":
             polls["n"] += 1

@@ -49,18 +49,40 @@ def instance_ids(cfg: Config, path: str) -> list[str]:
     return [i.get("id") for i in items if i.get("id")]
 
 
-def last_logs(cfg: Config, iid: str, limit: int = 40) -> str:
+def last_logs(cfg: Config, iid: str, limit: int = 60) -> str:
+    """Container logs for one instance.
+
+    The endpoint is the organisation's `log-entries`, filtered by instance.
+    The first version of this used `/instances/<id>/logs`, which does not
+    exist, so it returned nothing and the watcher reported "RUNNING" with no
+    output for seventeen minutes while the container was crash-looping. An empty
+    answer from a wrong URL looks exactly like a silent application, which is
+    the one thing a watcher must never pretend to know.
+    """
     try:
-        r = call(cfg, "GET", f"/instances/{iid}/logs?limit={limit}")
+        r = call(cfg, "GET",
+                 f"/organizations/{cfg.organization}/log-entries?instance_id={iid}")
     except SaladError as e:
-        return f"(logs unavailable: {str(e)[:120]})"
-    out = r if isinstance(r, list) else r.get("items", r.get("logs", []))
+        return f"(logs unavailable: {str(e)[:160]})"
+    if isinstance(r, str):
+        return r[-limit * 200:] or "(empty response)"
+    if isinstance(r, list):
+        entries = r
+    elif isinstance(r, dict):
+        entries = r.get("logs") or r.get("items") or r.get("entries") or []
+    else:
+        entries = []
     lines = []
-    for entry in out:
+    for entry in entries:
         if isinstance(entry, str):
             lines.append(entry)
         else:
-            lines.append(str(entry.get("message") or entry.get("log") or entry))
+            stamp = entry.get("created_at", "")
+            stream = entry.get("stream", "")
+            msg = entry.get("message", "")
+            lines.append(f"{stamp} {stream:<6} {msg}")
+    if not lines:
+        return "(no log entries for this instance)"
     return "\n".join(lines[-limit:])
 
 
