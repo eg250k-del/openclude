@@ -109,7 +109,19 @@ class Config:
     cpu: int = 8
     max_replicas: int = 1
     min_replicas: int = 0            # kept for the report; nothing autoscales now
-    priority: str = "low"
+    # high, not low. Checked live on 2026-09-28 with
+    # POST /organizations/<org>/availability/sce-gpu-availability:
+    #
+    #   RTX 3090 Ti   high 6   medium 0   low 0
+    #   RTX 4090      high 1   medium 0   low 0
+    #
+    # A low-priority group sat in `allocating` for five minutes and would have
+    # sat there indefinitely, because there was no low-priority capacity at
+    # all. The difference is $0.16/h against $0.33/h, so about seventeen cents
+    # to not wait forever. Worth it for a first run; worth revisiting once the
+    # film pipeline is known to work, because low priority is where the cheap
+    # capacity is supposed to be.
+    priority: str = "high"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -136,6 +148,22 @@ class Config:
                 "  SALAD_PROJECT        your container-engine project name\n"
                 "  OPENCLIDE_IMAGE      e.g. ghcr.io/eg250k-del/openclude:latest"
             )
+        # A tag is a tag. The CI pushes github.sha, which is 40 characters, and
+        # a 7-character abbreviation is a different, non-existent tag. The
+        # symptom is not a missing image: it is "Version 2: Manifest Not
+        # Found" on a group that otherwise deploys cleanly, which reads like a
+        # registry problem and cost an hour.
+        if ":" in image and not image.endswith(":latest"):
+            tag = image.rsplit(":", 1)[1]
+            if tag and all(c in "0123456789abcdef" for c in tag) and len(tag) != 40:
+                raise SaladError(
+                    f"OPENCLIDE_IMAGE looks like a shortened commit SHA: {image}\n"
+                    f"  The image is tagged with the full 40-character SHA. A short "
+                    f"SHA is a different tag and the node reports\n"
+                    f"  'Manifest Not Found'. Use: "
+                    f"gh run list --workflow build-image.yml --limit 1 "
+                    f"--json headSha"
+                )
         return cls(
             api_key=key,
             organization=org,
@@ -147,6 +175,7 @@ class Config:
             cpu=int(os.environ.get("OPENCLIDE_CPU", cls.cpu)),
             memory_mb=int(os.environ.get("OPENCLIDE_MEMORY_MB", cls.memory_mb)),
             storage_bytes=int(os.environ.get("OPENCLIDE_STORAGE_BYTES", cls.storage_bytes)),
+            priority=os.environ.get("OPENCLIDE_PRIORITY", cls.priority).strip(),
         )
 
     def gpu_class_ids(self) -> list[str]:
@@ -251,7 +280,7 @@ def group_spec(cfg: Config) -> dict[str, Any]:
         "headers": [],
     }
     return {
-        "name": GROUP_NAME,
+        "name": group_name(cfg),
         # false on purpose: a group that autostarts sits there billing all
         # night. The operator starts it with `salad start` and stops it with
         # `salad stop`, and neither of those is implicit.
@@ -368,6 +397,80 @@ def safe_json(value: object) -> str:
     return json.dumps(redact_any(value), indent=2, default=str)
 
 
+def cmd_delete(cfg: Config, args: list[str]) -> int:
+    """Delete a container group. Destructive, so it says so out loud.
+
+    This exists because SaladCloud will not let a Failed group be started or
+    stopped: both answer "not allowed while in a Failed status". A group wedged
+    that way can only be recovered by deleting it and creating it again, and
+    without this command the only way to do that is the Portal.
+
+    The guard is deliberate. Deleting a container group is irreversible, and the
+    SaladCloud guidance is explicit that it requires user intent, so the flag is
+    mandatory and the command prints what will be lost before it acts.
+    """
+    if "--yes-delete-it" not in args:
+        print(f"  This will DELETE the container group {GROUP_NAME!r} in")
+        print(f"  {cfg.organization}/{cfg.project}, including its logs.")
+        print("  Films already written to object storage are NOT affected; they")
+        print("  live in the bucket, not in the container.")
+        print()
+        print("  To confirm, re-run with:  delete --yes-delete-it")
+        return 2
+    try:
+        call(cfg, "DELETE", containers_path_for(cfg))
+    except SaladError as e:
+        text = str(e).lower()
+        if "404" in text or "not found" in text:
+            print(f"  nothing to delete: no group called {group_name(cfg)}")
+            return 0
+        print(f"  delete refused: {e}")
+        return 1
+    print(f"  deleted {group_name(cfg)}")
+    print("  create it again with:  apply --apply")
+    return 0
+
+
+def check_capacity(cfg: Config) -> dict:
+    """Is there actually a GPU free at this priority, right now?
+
+    This exists because a low-priority group sat in `allocating` for five
+    minutes and would have sat there indefinitely. Nothing was wrong with the
+    group, the image, or the store: there was simply no low-priority capacity,
+    and neither the portal nor `status` says so. `allocating` looks exactly
+    like slow progress.
+
+    So the availability endpoint is consulted before deploying, and the answer
+    is in the operator's face rather than in a five-minute wait.
+    """
+    out: dict = {"priority": cfg.priority, "gpu": cfg.gpu}
+    try:
+        r = call(cfg, "POST",
+                 f"/organizations/{cfg.organization}/availability/sce-gpu-availability",
+                 {
+                     "gpu_classes": cfg.gpu_class_ids(),
+                     "cpu": cfg.cpu,
+                     "memory": cfg.memory_mb,
+                     "storage_amount": cfg.storage_bytes,
+                 })
+    except SaladError as e:
+        return {**out, "ok": None, "note": f"availability unread: {e}"}
+
+    key = f"available_gpu_{cfg.priority}"
+    free = r.get(key)
+    out["free"] = free
+    out["ok"] = bool(free)
+    if not free:
+        others = {k.replace("available_gpu_", ""): v for k, v in r.items()
+                  if k.startswith("available_gpu_") and v}
+        out["note"] = (
+            f"NO capacity at priority {cfg.priority!r} for {cfg.gpu}. "
+            f"Available at other priorities: {others or 'none'}. "
+            f"Set OPENCLIDE_PRIORITY to one of those, or wait."
+        )
+    return out
+
+
 def containers_path(cfg: "Config") -> str:
     """The one and only spelling of the container-groups collection path.
 
@@ -379,8 +482,19 @@ def containers_path(cfg: "Config") -> str:
     return f"/organizations/{cfg.organization}/projects/{cfg.project}/containers"
 
 
-def containers_path_for(cfg: "Config", name: str) -> str:
-    return f"{containers_path(cfg)}/{name}"
+def group_name(cfg: "Config") -> str:
+    """The group name, from the environment or the default.
+
+    Overridable because SaladCloud held a name reserved after a delete:
+    GET by name returned 404 and the list was empty, but POST answered
+    name_conflict for several minutes. A name is a label, not an identity, so
+    the answer is to use a new one rather than wait.
+    """
+    return os.environ.get("OPENCLIDE_GROUP", "").strip() or GROUP_NAME
+
+
+def containers_path_for(cfg: "Config", name: str | None = None) -> str:
+    return f"{containers_path(cfg)}/{name or group_name(cfg)}"
 
 
 # --------------------------------------------------------------------------
@@ -389,15 +503,23 @@ def containers_path_for(cfg: "Config", name: str) -> str:
 
 
 def cmd_preflight(cfg: Config, _args: list[str]) -> int:
-    """Read-only. Proves the key works and shows the ceiling before spending."""
+    """Read-only. Proves the key works, and says whether anything can run.
+
+    The capacity check is the part that matters. A group with no capacity at its
+    priority sits in `allocating` indefinitely, and `allocating` is
+    indistinguishable from slow progress. Reading it here turns an unbounded
+    wait into a number.
+    """
     print("PREFLIGHT (read-only, costs nothing)\n")
     print(f"  organization : {cfg.organization}")
     print(f"  project      : {cfg.project}")
+    print(f"  group        : {group_name(cfg)}")
     print(f"  image        : {cfg.image}")
-    print(f"  gpu          : {cfg.gpu.strip()}   priority: {cfg.priority}")
-    print(f"  cpu / memory : {cfg.cpu} cores / {cfg.memory_gib} GiB")
-    print(f"  disk request : {cfg.storage_mb} MB")
-    print(f"  replicas     : {cfg.min_replicas} (idle) .. {cfg.max_replicas} (busy)")
+    print(f"  gpu          : {cfg.gpu}   priority: {cfg.priority}")
+    print(f"  cpu / memory : {cfg.cpu} cores / {cfg.memory_mb} MB")
+    print(f"  disk request : {cfg.storage_bytes} bytes "
+          f"({cfg.storage_bytes / 1024**3:.0f} GB)")
+    print(f"  replicas     : {cfg.max_replicas}")
     print()
 
     try:
@@ -405,15 +527,24 @@ def cmd_preflight(cfg: Config, _args: list[str]) -> int:
     except SaladError as e:
         print(f"  quota read FAILED: {e}")
         return 1
-    print("  quota read OK")
-    print(safe_json(quotas)[:1500])
+    counts = quotas.get("container_groups_quotas", {}) if isinstance(quotas, dict) else {}
+    print(f"  quota        : {counts.get('container_replicas_used', '?')} used of "
+          f"{counts.get('container_replicas_quota', '?')}")
     print()
-    try:
-        nodes = call(cfg, "GET", f"/organizations/{cfg.organization}/availability/sce-gpu-availability")
-        print("  gpu availability read OK")
-        print(safe_json(nodes)[:800])
-    except SaladError as e:
-        print(f"  node pool read failed (not fatal): {e}")
+
+    cap = check_capacity(cfg)
+    free = cap.get("free")
+    if cap.get("ok"):
+        print(f"  CAPACITY OK  : {free} x {cfg.gpu} free at priority {cfg.priority}")
+    elif cap.get("ok") is None:
+        print(f"  capacity     : unknown ({cap.get('note')})")
+    else:
+        print(f"  NO CAPACITY  : {cap.get('note')}")
+        print()
+        print("  Deploying now would sit in 'allocating' forever. Either change")
+        print("  OPENCLIDE_PRIORITY to one that has capacity, or wait and re-run")
+        print("  this command. It costs nothing and takes two seconds.")
+        return 1
     return 0
 
 
@@ -471,15 +602,15 @@ def cmd_apply(cfg: Config, _args: list[str]) -> int:
 
     existing = None
     try:
-        existing = call(cfg, "GET", f"{containers_path_for(cfg, GROUP_NAME)}")
+        existing = call(cfg, "GET", f"{containers_path_for(cfg)}")
     except SaladError:
         existing = None
 
     if existing:
-        print(f"  group {GROUP_NAME} already exists; merging the spec into it")
-        action, path, body = "PATCH", f"{containers_path_for(cfg, GROUP_NAME)}", spec
+        print(f"  group {group_name(cfg)} already exists; merging the spec into it")
+        action, path, body = "PATCH", f"{containers_path_for(cfg)}", spec
     else:
-        print(f"  creating group {GROUP_NAME}")
+        print(f"  creating group {group_name(cfg)}")
         action, path, body = "POST", p, spec
 
     result = call(cfg, action, path, body)
@@ -489,7 +620,7 @@ def cmd_apply(cfg: Config, _args: list[str]) -> int:
     # 202 means accepted, not ready. Verify with a read.
     time.sleep(3)
     try:
-        after = call(cfg, "GET", f"{containers_path_for(cfg, GROUP_NAME)}")
+        after = call(cfg, "GET", f"{containers_path_for(cfg)}")
         print(f"  read-back OK: name={after.get('name')} "
               f"replicas={after.get('replicas')} state={after.get('state')}")
     except SaladError as e:
@@ -516,7 +647,7 @@ def cmd_start(cfg: Config, _args: list[str]) -> int:
     group left on overnight is the expensive mistake, and the fix is one
     `stop`.
     """
-    path = f"{containers_path_for(cfg, GROUP_NAME)}/start"
+    path = f"{containers_path_for(cfg)}/start"
     try:
         result = call(cfg, "POST", path, {})
     except SaladError as e:
@@ -536,13 +667,13 @@ def cmd_stop(cfg: Config, _args: list[str]) -> int:
     is idempotent on purpose: running it twice is not an error, because the
     instinct after a successful stop is to press it again.
     """
-    path = f"{containers_path_for(cfg, GROUP_NAME)}/stop"
+    path = f"{containers_path_for(cfg)}/stop"
     try:
         result = call(cfg, "POST", path, {})
     except SaladError as e:
         text = str(e).lower()
         if "not found" in text or "404" in text:
-            print(f"  nothing to stop: no group called {GROUP_NAME}")
+            print(f"  nothing to stop: no group called {group_name(cfg)}")
             return 0
         print(f"  stop refused: {e}")
         return 1
@@ -554,12 +685,12 @@ def cmd_stop(cfg: Config, _args: list[str]) -> int:
 def cmd_status(cfg: Config, _args: list[str]) -> int:
 
     p = containers_path(cfg)
-    group = call(cfg, "GET", f"{containers_path_for(cfg, GROUP_NAME)}")
+    group = call(cfg, "GET", f"{containers_path_for(cfg)}")
     print(safe_json(group)[:2500])
     gid = group.get("id")
     if gid:
         try:
-            inst = call(cfg, "GET", f"{containers_path_for(cfg, GROUP_NAME)}/instances")
+            inst = call(cfg, "GET", f"{containers_path_for(cfg)}/instances")
             print("\nINSTANCES")
             print(safe_json(inst)[:2000])
         except SaladError as e:
@@ -591,6 +722,7 @@ COMMANDS = {
     "stop": cmd_stop,
     "status": cmd_status,
     "logs": cmd_logs,
+    "delete": cmd_delete,
 }
 
 

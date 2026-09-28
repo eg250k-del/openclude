@@ -56,8 +56,23 @@ def test_start_posts_to_the_group_start_endpoint(config, monkeypatch, capsys) ->
     assert cmd_start(config, []) == 0
     method, path, _ = calls[0]
     assert method == "POST"
-    assert path.endswith(f"/containers/{GROUP_NAME}/start")
+    assert path.endswith(f"/containers/{salad.group_name(config)}/start")
     assert "accepted" in capsys.readouterr().out
+
+
+def test_the_group_name_can_be_overridden(config, monkeypatch) -> None:
+    """SaladCloud held a name reserved after a delete and answered name_conflict
+    while GET by name returned 404 and the list was empty. A name is a label,
+    so the answer is a new label, not a wait."""
+    monkeypatch.setenv("OPENCLIDE_GROUP", "openclude-v2")
+    assert salad.group_name(config) == "openclude-v2"
+    assert salad.group_spec(config)["name"] == "openclude-v2"
+    assert "openclude-v2" in salad.containers_path_for(config)
+
+
+def test_the_group_name_defaults_when_unset(config, monkeypatch) -> None:
+    monkeypatch.delenv("OPENCLIDE_GROUP", raising=False)
+    assert salad.group_name(config) == salad.GROUP_NAME
 
 
 def test_start_uses_the_configured_org_and_project(config, monkeypatch) -> None:
@@ -91,7 +106,7 @@ def test_start_tells_the_operator_it_is_not_instant(config, monkeypatch, capsys)
 def test_stop_posts_to_the_group_stop_endpoint(config, monkeypatch, capsys) -> None:
     calls = _capture(monkeypatch)
     assert cmd_stop(config, []) == 0
-    assert calls[0][1].endswith(f"/containers/{GROUP_NAME}/stop")
+    assert calls[0][1].endswith(f"/containers/{salad.group_name(config)}/stop")
     assert "accepted" in capsys.readouterr().out
 
 

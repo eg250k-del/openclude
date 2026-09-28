@@ -253,6 +253,38 @@ def test_the_startup_probe_allows_a_long_model_download(clean_env) -> None:
     assert grace >= 300
 
 
+def test_a_shortened_commit_sha_is_refused(clean_env, monkeypatch) -> None:
+    """A 7-character SHA is a different tag, and the node says "Manifest Not Found".
+
+    The CI tags images with the full 40-character github.sha. Deploying with
+    `git rev-parse --short` produced a group that failed with an error that
+    reads like a registry fault and is not one.
+    """
+    monkeypatch.setenv("OPENCLIDE_IMAGE", "ghcr.io/eg250k-del/openclude:5dd7cf5")
+    with pytest.raises(salad.SaladError, match="shortened commit SHA"):
+        Config.from_env()
+
+
+def test_the_full_sha_is_accepted(clean_env, monkeypatch) -> None:
+    sha = "5dd7cf5220eab74cb0bc5b2c647c38e30d7a3de1"
+    monkeypatch.setenv("OPENCLIDE_IMAGE", f"ghcr.io/eg250k-del/openclude:{sha}")
+    assert Config.from_env().image.endswith(sha)
+
+
+def test_latest_is_accepted(clean_env, monkeypatch) -> None:
+    monkeypatch.setenv("OPENCLIDE_IMAGE", "ghcr.io/eg250k-del/openclude:latest")
+    assert Config.from_env().image.endswith(":latest")
+
+
+def test_a_real_tag_is_not_mistaken_for_a_sha(clean_env, monkeypatch) -> None:
+    """Six hex characters would trip a naive length check, so require 7+."""
+    monkeypatch.setenv("OPENCLIDE_IMAGE", "ghcr.io/eg250k-del/openclude:abcdef1")
+    with pytest.raises(salad.SaladError, match="shortened commit SHA"):
+        Config.from_env()
+    monkeypatch.setenv("OPENCLIDE_IMAGE", "ghcr.io/eg250k-del/openclude:v2.1")
+    assert Config.from_env().image.endswith("v2.1")
+
+
 def test_the_spec_requires_object_storage(clean_env) -> None:
     """The container must refuse to start without a durable store."""
     env = container_of()["environment_variables"]
